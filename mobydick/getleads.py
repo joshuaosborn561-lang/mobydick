@@ -1,0 +1,214 @@
+"""GetLeads pull via hosted MCP (count / search / export)."""
+
+from __future__ import annotations
+
+import csv
+import io
+import time
+from typing import Any, Callable
+
+import requests
+
+from mobydick.audiences import getleads_search_args
+from mobydick.config import Settings, settings as default_settings
+from mobydick.domains import normalize_domain
+from mobydick.mcp_http import McpError, McpHttpClient
+from mobydick.schemas import GETLEADS_EXPORT_COLUMNS
+
+
+def _first(*values: Any) -> str:
+    for value in values:
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, dict):
+            inner = value.get("value") or value.get("name") or value.get("email")
+            if inner:
+                return str(inner).strip()
+            continue
+        return str(value).strip()
+    return ""
+
+
+def unwrap_records(data: Any) -> list[dict[str, Any]]:
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return [r for r in data if isinstance(r, dict)]
+    if not isinstance(data, dict):
+        return []
+    for key in ("contacts", "people", "leads", "results", "items", "data", "records"):
+        nested = data.get(key)
+        if isinstance(nested, list):
+            return [r for r in nested if isinstance(r, dict)]
+        if isinstance(nested, dict):
+            inner = unwrap_records(nested)
+            if inner:
+                return inner
+    if any(k in data for k in ("email", "full_name", "company_name", "first_name")):
+        return [data]
+    return []
+
+
+def contact_from_raw(raw: dict[str, Any]) -> dict[str, str]:
+    company = raw.get("company") if isinstance(raw.get("company"), dict) else {}
+    email = _first(raw.get("email"), raw.get("email_address"), raw.get("work_email"))
+    domain = normalize_domain(
+        _first(
+            raw.get("company_domain"),
+            raw.get("domain"),
+            company.get("domain") if company else "",
+            email.split("@", 1)[1] if "@" in email else "",
+        )
+    )
+    first = _first(raw.get("first_name"), raw.get("firstname"))
+    last = _first(raw.get("last_name"), raw.get("lastname"))
+    full = _first(raw.get("full_name"), raw.get("name"), f"{first} {last}".strip())
+    website = _first(
+        raw.get("company_website"),
+        raw.get("website"),
+        company.get("website") if company else "",
+    )
+    return {
+        "first_name": first,
+        "last_name": last,
+        "full_name": full,
+        "title": _first(raw.get("title"), raw.get("job_title")),
+        "email": email.lower() if email else "",
+        "linkedin_url": _first(raw.get("linkedin_url"), raw.get("linkedin")),
+        "company_name": _first(raw.get("company_name"), company.get("name") if company else ""),
+        "company_domain": domain,
+        "company_website": website,
+        "company_description": _first(raw.get("company_description"), raw.get("description")),
+        "location": _first(raw.get("location"), raw.get("city"), raw.get("state")),
+        "funding_round": _first(
+            raw.get("funding_round"),
+            raw.get("funding_type"),
+            raw.get("last_funding_type"),
+        ),
+        "funding_amount": _first(
+            raw.get("funding_amount"),
+            raw.get("last_funding_amount"),
+        ),
+        "funding_date": _first(
+            raw.get("funding_date"),
+            raw.get("last_funding_date"),
+        ),
+        "source_note": "getleads",
+    }
+
+
+class GetLeadsClient:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        client: McpHttpClient | None = None,
+        http: requests.Session | None = None,
+    ) -> None:
+        self.settings = settings or default_settings
+        self.http = http or requests.Session()
+        self._client = client
+        self.errors: list[str] = []
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.settings.getleads_api_key and self.settings.getleads_endpoint)
+
+    def client(self) -> McpHttpClient:
+        if self._client is None:
+            if not self.enabled:
+                raise RuntimeError("GETLEADS_API_KEY and GETLEADS_ENDPOINT are required")
+            self._client = McpHttpClient(
+                url=self.settings.getleads_endpoint,
+                token=self.settings.getleads_api_key,
+                timeout=90,
+            )
+        return self._client
+
+    def count(self, filters: dict[str, Any]) -> dict[str, Any]:
+        args = getleads_search_args(filters)
+        return self.client().call_tool("count_contacts", args)
+
+    def search(
+        self,
+        filters: dict[str, Any],
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, str]]:
+        args = getleads_search_args(filters)
+        args["limit"] = max(1, min(int(limit), 100))
+        args["offset"] = max(0, int(offset))
+        args["columns"] = list(GETLEADS_EXPORT_COLUMNS)
+        data = self.client().call_tool("search_contacts", args)
+        return [contact_from_raw(row) for row in unwrap_records(data)]
+
+    def pull(
+        self,
+        filters: dict[str, Any],
+        *,
+        max_rows: int,
+        max_per_company: int = 1,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[dict[str, str]]:
+        """Search in pages first; use export when the ask is bigger than 200."""
+        if max_rows > 200:
+            try:
+                return self.export(
+                    filters,
+                    max_rows=max_rows,
+                    max_per_company=max_per_company,
+                    progress=progress,
+                )
+            except (McpError, RuntimeError) as exc:
+                self.errors.append(f"export_fallback: {exc}")
+        rows: list[dict[str, str]] = []
+        offset = 0
+        page_size = 100
+        while len(rows) < max_rows:
+            batch = self.search(filters, limit=min(page_size, max_rows - len(rows)), offset=offset)
+            if not batch:
+                break
+            rows.extend(batch)
+            offset += len(batch)
+            if progress:
+                progress({"pulled": len(rows), "target": max_rows, "mode": "search"})
+            if len(batch) < page_size:
+                break
+        return rows[:max_rows]
+
+    def export(
+        self,
+        filters: dict[str, Any],
+        *,
+        max_rows: int,
+        max_per_company: int = 1,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[dict[str, str]]:
+        args = getleads_search_args(filters)
+        args["confirmed"] = True
+        args["max_rows"] = max(1, min(int(max_rows), 50000))
+        args["max_per_company"] = max(1, min(int(max_per_company), 50))
+        args["columns"] = list(GETLEADS_EXPORT_COLUMNS)
+        started = self.client().call_tool("export_contacts", args)
+        export_id = str(started.get("export_id") or started.get("id") or "")
+        if not export_id:
+            raise RuntimeError(f"export_contacts did not return export_id: {started}")
+        deadline = time.time() + 180
+        status: dict[str, Any] = {}
+        while time.time() < deadline:
+            status = self.client().call_tool("check_contact_export", {"export_id": export_id})
+            job_status = str(status.get("job_status") or status.get("status") or "").lower()
+            if progress:
+                progress({"export_id": export_id, "status": job_status})
+            if job_status in {"completed", "complete", "done", "success"}:
+                break
+            if job_status in {"failed", "error"}:
+                raise RuntimeError(f"GetLeads export failed: {status}")
+            time.sleep(2)
+        url = str(status.get("export_url") or status.get("url") or "")
+        if not url:
+            raise RuntimeError(f"GetLeads export had no URL: {status}")
+        resp = self.http.get(url, timeout=90)
+        resp.raise_for_status()
+        reader = csv.DictReader(io.StringIO(resp.text))
+        return [contact_from_raw(dict(row)) for row in reader]
