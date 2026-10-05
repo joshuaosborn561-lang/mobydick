@@ -100,13 +100,26 @@ def build_enriched_list(
     if name != "pe_partners" and funded_since:
         fresh = [row for row in fresh if _funding_ok(row, funded_since)]
 
+    early_dq: list[dict[str, str]] = []
+    if name == "pe_partners":
+        from mobydick.pe_fit import assess_pe
+
+        passing: list[dict[str, str]] = []
+        for row in fresh:
+            verdict = assess_pe(row)
+            if verdict["dq"]:
+                early_dq.append({"dq": verdict["dq"], "firm_type": verdict["firm_type"]})
+                continue
+            passing.append(row)
+        fresh = passing
+
     if progress:
         progress({"stage": "dedupe", "unique": len(unique), "fresh": len(fresh), "dropped_prior": dropped_prior})
 
     waterfall_stats = fill_missing_emails(fresh, progress=progress)
     enriched = enrich_rows(fresh, name, fetch_pages=fetch_pages and enrich, progress=progress)
     keepers = [row for row in enriched if not row.get("dq")]
-    dq_rows = [row for row in enriched if row.get("dq")]
+    dq_rows = early_dq + [row for row in enriched if row.get("dq")]
     delivered = keepers[:wanted]
     path = store.write_delivery(name, delivered)
 
@@ -129,7 +142,10 @@ def build_enriched_list(
         "csv_path": str(path),
         "csv_name": path.name,
         "samples": samples,
-        "note": "CSV only. Do not paste the list into chat. Same-day files are also excluded next pull.",
+        "note": (
+            "CSV only. Call download_delivery with job_id or csv_name to save the file. "
+            "Do not paste the list into chat. Same-day files are also excluded next pull."
+        ),
         "waterfall": {
             "missing_before": waterfall_stats.get("missing_before"),
             "filled": waterfall_stats.get("filled"),

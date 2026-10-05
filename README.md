@@ -14,7 +14,7 @@ Never call it Flowers Engine.
 
 **Whale gift dossiers.** For one lower-middle-market PE partner with a real public footprint, it recommends a ~$100 personal gift backed by a citable source.
 
-Lists never go into chat. Counts and about 10 sample names only.
+Lists never go into chat. Counts and about 10 sample names only. `download_delivery` is the one tool that returns the CSV text, plus a 15-minute signed link at `GET /deliveries/{filename}?exp=&sig=`. Save that file. Do not paste the rows into chat.
 
 ## MCP tools
 
@@ -25,14 +25,15 @@ Lists never go into chat. Counts and about 10 sample names only.
 | `get_job_status` / `fetch_job_result` / `list_jobs` | Poll long pulls. Result is path + counts + samples. |
 | `exclude_add` / `exclude_check` / `exclude_count` / `exclude_import` | Persist the never-again domain list. |
 | `list_deliveries` | Paths to past CSVs. |
+| `download_delivery` | One delivery CSV by job id or filename. Save it locally. |
 | `health` | Which connectors are configured. No secrets. |
 
 ## Pipeline
 
-1. GetLeads pull (1.5x to 3x the ask). Series A/B default: US HQ, SaaS/software, CEO or Founder, Series A or B, funded since 2024-01-01, require email, one per company. PE default: US partners / principals / independent sponsors. Associates and assistants are out.
+1. GetLeads pull (1.5x to 3x the ask). Series A/B default: US HQ, SaaS/software, CEO or Founder, Series A or B, funded since 2024-01-01, require email, one per company. PE default: US person and US HQ, real private equity / growth equity / buyout firms, and partner-grade deal titles only. Banks, advisors, non-US roles, and substring title matches are dropped.
 2. De-dupe against `data/exclude/*.json` **and same-day delivery files**. The morning file counts.
 3. Missing emails: Josh's email-waterfall MCP (`client_tag=salesglider`) plus LeadMagic so the CSV itself gets filled. Waterfall MCP never returns row payloads.
-4. Public-source enrichment: company about/contact pages. YouTube talks + transcripts and one Taddy search on whale dossiers. Apify only when the public web is thin.
+4. Public-source enrichment: company about/contact pages for the office address. PE rows also use YouTube, Taddy, and Apify for the person's life story. Whale dossiers use the same connectors. Every personal fact needs a public source. Blank if none.
 5. Office mailing address only. Never a home address. Never invent. Blank if none.
 6. DQ column for bad fits. Keepers only go in the delivery CSV.
 7. New domains are added to the exclude list automatically.
@@ -45,7 +46,7 @@ Series A/B:
 
 PE partners:
 
-`first_name,last_name,full_name,email,title,company_name,company_domain,company_website,linkedin_url,location,mailing_address,hometown_or_from,why_got_into_pe,real_story,best_emotional_hook,beliefs_or_causes,firm_type,source_notes,confidence,sources,research_note`
+`first_name,last_name,full_name,email,title,company_name,company_domain,company_website,linkedin_url,location,mailing_address,hometown_or_from,family_background,college,military_service,early_jobs,why_got_into_pe,beliefs_or_causes,life_events,quotes,real_story,best_emotional_hook,firm_type,source_notes,confidence,sources,research_note`
 
 ## Setup
 

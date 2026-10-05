@@ -99,10 +99,85 @@ def test_samples_never_include_email_or_hooks(tmp_path):
                 "email": "secret@firm.com",
                 "company_name": "Firm",
                 "company_domain": "firm.pe",
+                "company_description": "lower-middle-market private equity firm",
+                "company_industry": "Venture Capital and Private Equity Principals",
+                "contact_country": "United States",
+                "company_hq_country": "United States",
+                "location": "Austin, Texas",
             }
         ],
     )
     sample = result["samples"][0]
     assert "email" not in sample
     assert "best_emotional_hook" not in sample
+    assert "quotes" not in sample
     assert sample["full_name"] == "Pat Partner"
+    assert sample["firm_type"] == "private equity"
+
+
+def test_pe_pipeline_drops_wrong_country_title_and_firm(tmp_path):
+    store = Store(_settings(tmp_path))
+    good = {
+        "full_name": "Pat Partner",
+        "first_name": "Pat",
+        "last_name": "Partner",
+        "title": "Managing Partner",
+        "email": "secret@firm.com",
+        "company_name": "Northline",
+        "company_domain": "northline.com",
+        "company_description": "lower-middle-market private equity firm",
+        "contact_country": "United States",
+        "company_hq_country": "United States",
+        "location": "Austin, Texas",
+    }
+    result = build_enriched_list(
+        "pe_partners",
+        10,
+        store=store,
+        fetch_pages=False,
+        raw_rows=[
+            good,
+            {
+                **good,
+                "full_name": "Tetsuji Okamoto",
+                "company_domain": "apollo.example",
+                "contact_country": "Japan",
+                "company_hq_country": "Japan",
+                "location": "Tokyo, Japan",
+            },
+            {
+                **good,
+                "full_name": "Selim Loukil",
+                "title": "Head of PSG Europe",
+                "company_domain": "advent.example",
+            },
+            {
+                **good,
+                "full_name": "Matt Sepulveda",
+                "title": "Principal Economist",
+                "company_domain": "econ.example",
+            },
+            {
+                **good,
+                "full_name": "Banker One",
+                "company_name": "Imperial Capital",
+                "company_domain": "imperial.example",
+                "company_description": "middle-market investment bank",
+                "company_industry": "Capital Markets",
+            },
+            {
+                **good,
+                "full_name": "Advisor One",
+                "company_name": "Kroll",
+                "company_domain": "kroll.example",
+                "company_description": "global risk advisory and corporate investigations",
+            },
+        ],
+    )
+    assert result["delivered"] == 1
+    assert result["samples"][0]["full_name"] == "Pat Partner"
+    assert "email" not in result["samples"][0]
+    assert result["dq_reasons"]["not_us_person"] == 1
+    assert result["dq_reasons"]["non_us_role"] == 1
+    assert result["dq_reasons"]["non_deal_role"] == 1
+    assert result["dq_reasons"]["not_pe_firm"] == 2

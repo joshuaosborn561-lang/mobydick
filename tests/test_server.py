@@ -14,5 +14,6 @@ def test_server_exposes_expected_tools():
         "exclude_import",
         "list_jobs",
         "list_deliveries",
+        "download_delivery",
         "health",
     } <= names

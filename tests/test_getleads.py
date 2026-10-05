@@ -59,7 +59,9 @@ def test_search_sends_catalog_columns_and_maps_new_fields():
                     "company_domain": "firm.example",
                     "current_employer_website": "https://firm.example",
                     "contact_location": "Austin, Texas",
+                    "contact_country": "United States",
                     "company_hq_country": "United States",
+                    "company_industry": "Venture Capital and Private Equity Principals",
                     "last_funding_type": "series a",
                     "last_funding_amount": "12000000",
                     "last_funding_date": "2024-06-01",
@@ -87,6 +89,9 @@ def test_search_sends_catalog_columns_and_maps_new_fields():
     assert rows[0]["email"] == "pat@firm.example"
     assert rows[0]["company_website"] == "https://firm.example"
     assert rows[0]["location"] == "Austin, Texas"
+    assert rows[0]["contact_country"] == "United States"
+    assert rows[0]["company_hq_country"] == "United States"
+    assert rows[0]["company_industry"] == "Venture Capital and Private Equity Principals"
     assert rows[0]["funding_round"] == "series a"
     assert rows[0]["funding_date"] == "2024-06-01"
     assert rows[0]["company_domain"] == "firm.example"

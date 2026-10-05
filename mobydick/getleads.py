@@ -100,6 +100,13 @@ def contact_from_raw(raw: dict[str, Any]) -> dict[str, str]:
             raw.get("contact_state"),
             raw.get("state"),
         ),
+        "contact_country": _first(raw.get("contact_country"), raw.get("person_country"), raw.get("country")),
+        "company_hq_country": _first(raw.get("company_hq_country"), raw.get("headquarters_country")),
+        "company_industry": _first(
+            raw.get("company_industry"),
+            raw.get("main_industry"),
+            raw.get("current_company_industry"),
+        ),
         "funding_round": _first(
             raw.get("funding_round"),
             raw.get("last_funding_type"),
