@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from typing import Any
 
 import requests
+
+logger = logging.getLogger("mobydick.mcp_http")
+
+# Long enough for GetLeads invalid_columns + column_replacements, short enough for a job error.
+ERROR_BODY_LIMIT = 4000
 
 DEFAULT_PROTOCOL = "2025-03-26"
 
@@ -90,15 +96,42 @@ def parse_mcp_response(response: requests.Response, request_id: Any) -> dict[str
     raise McpError("MCP JSON was not an object", status=response.status_code, body=text[:300])
 
 
+def tool_error_detail(result: dict[str, Any]) -> str:
+    """Text GetLeads (and other MCP servers) put on an isError result."""
+    parts: list[str] = []
+    for item in result.get("content") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") not in (None, "text"):
+            continue
+        text = str(item.get("text") or "").strip()
+        if text:
+            parts.append(text)
+    structured = result.get("structuredContent")
+    if isinstance(structured, (dict, list)):
+        parts.append(json.dumps(structured, default=str))
+    elif structured not in (None, ""):
+        parts.append(str(structured))
+    if not parts:
+        parts.append(json.dumps(result, default=str))
+    detail = "\n".join(parts).strip()
+    return detail[:ERROR_BODY_LIMIT]
+
+
 def extract_tool_result(rpc: dict[str, Any]) -> dict[str, Any]:
     if rpc.get("error"):
         err = rpc["error"]
-        raise McpError(str(err.get("message") or err), body=json.dumps(err)[:300])
+        body = json.dumps(err, default=str)[:ERROR_BODY_LIMIT]
+        message = str(err.get("message") or err)
+        if body and body not in message:
+            message = f"{message}: {body}"
+        raise McpError(message, body=body)
     result = rpc.get("result")
     if not isinstance(result, dict):
         raise McpError("MCP tools/call missing result object")
     if result.get("isError") is True:
-        raise McpError("MCP tool isError", is_tool_error=True, body=json.dumps(result)[:300])
+        detail = tool_error_detail(result)
+        raise McpError(f"MCP tool isError: {detail}", is_tool_error=True, body=detail)
     structured = result.get("structuredContent")
     if isinstance(structured, dict):
         return structured
@@ -195,10 +228,11 @@ class McpHttpClient:
         }
         resp = self._post(payload, include_protocol=False)
         if resp.status_code >= 400:
+            body = (resp.text or "")[:ERROR_BODY_LIMIT]
             raise McpError(
-                "MCP initialize failed",
+                f"MCP initialize failed: {body}",
                 status=resp.status_code,
-                body=resp.text[:300],
+                body=body,
             )
         session = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
         if session:
@@ -228,10 +262,11 @@ class McpHttpClient:
                 self._initialize_locked()
             resp = self._post(payload, include_protocol=True)
         if resp.status_code >= 400:
+            body = (resp.text or "")[:ERROR_BODY_LIMIT]
             raise McpError(
-                f"MCP HTTP {resp.status_code}",
+                f"MCP HTTP {resp.status_code}: {body}",
                 status=resp.status_code,
-                body=resp.text[:300],
+                body=body,
             )
         return parse_mcp_response(resp, rpc_id)
 
@@ -243,4 +278,14 @@ class McpHttpClient:
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         rpc = self._rpc("tools/call", {"name": name, "arguments": arguments or {}})
-        return extract_tool_result(rpc)
+        try:
+            return extract_tool_result(rpc)
+        except McpError as exc:
+            if exc.is_tool_error or exc.body:
+                logger.error("MCP tool %s failed: %s", name, exc.body or exc)
+            raise McpError(
+                f"MCP tool {name} failed: {exc.body or exc}",
+                status=exc.status,
+                body=exc.body,
+                is_tool_error=exc.is_tool_error,
+            ) from exc

@@ -51,11 +51,12 @@ def unwrap_records(data: Any) -> list[dict[str, Any]]:
 
 def contact_from_raw(raw: dict[str, Any]) -> dict[str, str]:
     company = raw.get("company") if isinstance(raw.get("company"), dict) else {}
-    email = _first(raw.get("email"), raw.get("email_address"), raw.get("work_email"))
+    email = _first(raw.get("email"), raw.get("work_email"), raw.get("email_address"))
     domain = normalize_domain(
         _first(
             raw.get("company_domain"),
             raw.get("domain"),
+            raw.get("org_domain"),
             company.get("domain") if company else "",
             email.split("@", 1)[1] if "@" in email else "",
         )
@@ -65,6 +66,8 @@ def contact_from_raw(raw: dict[str, Any]) -> dict[str, str]:
     full = _first(raw.get("full_name"), raw.get("name"), f"{first} {last}".strip())
     website = _first(
         raw.get("company_website"),
+        raw.get("current_employer_website"),
+        raw.get("current_company_website"),
         raw.get("website"),
         company.get("website") if company else "",
     )
@@ -72,22 +75,40 @@ def contact_from_raw(raw: dict[str, Any]) -> dict[str, str]:
         "first_name": first,
         "last_name": last,
         "full_name": full,
-        "title": _first(raw.get("title"), raw.get("job_title")),
+        "title": _first(raw.get("title"), raw.get("current_title"), raw.get("job_title")),
         "email": email.lower() if email else "",
         "linkedin_url": _first(raw.get("linkedin_url"), raw.get("linkedin")),
-        "company_name": _first(raw.get("company_name"), company.get("name") if company else ""),
+        "company_name": _first(
+            raw.get("company_name"),
+            raw.get("current_employer"),
+            raw.get("co_name"),
+            company.get("name") if company else "",
+        ),
         "company_domain": domain,
         "company_website": website,
-        "company_description": _first(raw.get("company_description"), raw.get("description")),
-        "location": _first(raw.get("location"), raw.get("city"), raw.get("state")),
+        "company_description": _first(
+            raw.get("company_description"),
+            raw.get("co_description"),
+            raw.get("description"),
+        ),
+        "location": _first(
+            raw.get("location"),
+            raw.get("contact_location"),
+            raw.get("current_location"),
+            raw.get("contact_city"),
+            raw.get("city"),
+            raw.get("contact_state"),
+            raw.get("state"),
+        ),
         "funding_round": _first(
             raw.get("funding_round"),
-            raw.get("funding_type"),
             raw.get("last_funding_type"),
+            raw.get("funding_type"),
         ),
         "funding_amount": _first(
             raw.get("funding_amount"),
             raw.get("last_funding_amount"),
+            raw.get("total_funding_amount"),
         ),
         "funding_date": _first(
             raw.get("funding_date"),

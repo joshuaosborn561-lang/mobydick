@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import traceback
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from mobydick.config import settings
+
+logger = logging.getLogger("mobydick.jobs")
 
 JOBS_DIR = settings.jobs_dir
 
@@ -89,6 +92,15 @@ def update_job_progress(job_id: str, snapshot: dict[str, Any]) -> None:
     _persist(job)
 
 
+def format_job_error(exc: BaseException) -> str:
+    """Include the upstream MCP body. str(exc) alone used to drop it."""
+    message = f"{type(exc).__name__}: {exc}"
+    body = str(getattr(exc, "body", "") or "")
+    if body and body not in message:
+        message = f"{message}\n{body}"
+    return message[:4000]
+
+
 def start_job(
     kind: str,
     fn: Callable[[Job], dict[str, Any]],
@@ -114,8 +126,9 @@ def start_job(
             job.status = "completed"
         except Exception as exc:  # noqa: BLE001
             job.status = "failed"
-            job.error = f"{type(exc).__name__}: {exc}"
+            job.error = format_job_error(exc)
             job.result = {"traceback": traceback.format_exc()[-4000:]}
+            logger.error("job %s failed: %s", job.id, job.error, exc_info=True)
         finally:
             job.finished_at = time.time()
             _persist(job)

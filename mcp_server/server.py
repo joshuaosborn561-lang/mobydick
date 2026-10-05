@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -351,7 +353,19 @@ def _mount_http_routes() -> None:
 _mount_http_routes()
 
 
+def _configure_logging() -> None:
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(levelname)s %(name)s %(message)s",
+            stream=sys.stderr,
+        )
+    logging.getLogger("mobydick").setLevel(logging.INFO)
+
+
 def main() -> None:
+    _configure_logging()
     _ensure_cwd()
     transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
     host = os.environ.get("HOST", "0.0.0.0")
