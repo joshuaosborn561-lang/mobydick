@@ -74,6 +74,8 @@ PE_EXCLUDE_TITLES = [
     "Research",
     "Investor Relations",
     "Research Analyst",
+    "CFO",
+    "Chief Financial Officer",
 ]
 
 DEFAULT_FUNDED_SINCE = "2024-01-01"

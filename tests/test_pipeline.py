@@ -96,7 +96,7 @@ def test_samples_never_include_email_or_hooks(tmp_path):
                 "first_name": "Pat",
                 "last_name": "Partner",
                 "title": "Managing Partner",
-                "email": "secret@firm.com",
+                "email": "secret@firm.pe",
                 "company_name": "Firm",
                 "company_domain": "firm.pe",
                 "company_description": "lower-middle-market private equity firm",
@@ -115,14 +115,16 @@ def test_samples_never_include_email_or_hooks(tmp_path):
     assert sample["firm_type"] == "private equity"
 
 
-def test_pe_pipeline_drops_wrong_country_title_and_firm(tmp_path):
+def test_pe_pipeline_drops_wrong_country_title_and_firm(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     store = Store(_settings(tmp_path))
     good = {
         "full_name": "Pat Partner",
         "first_name": "Pat",
         "last_name": "Partner",
         "title": "Managing Partner",
-        "email": "secret@firm.com",
+        "email": "secret@northline.com",
         "company_name": "Northline",
         "company_domain": "northline.com",
         "company_description": "lower-middle-market private equity firm",
@@ -137,41 +139,46 @@ def test_pe_pipeline_drops_wrong_country_title_and_firm(tmp_path):
         fetch_pages=False,
         raw_rows=[
             good,
-            {
-                **good,
-                "full_name": "Tetsuji Okamoto",
-                "company_domain": "apollo.example",
-                "contact_country": "Japan",
-                "company_hq_country": "Japan",
-                "location": "Tokyo, Japan",
-            },
-            {
-                **good,
-                "full_name": "Selim Loukil",
-                "title": "Head of PSG Europe",
-                "company_domain": "advent.example",
-            },
-            {
-                **good,
-                "full_name": "Matt Sepulveda",
-                "title": "Principal Economist",
-                "company_domain": "econ.example",
-            },
-            {
-                **good,
-                "full_name": "Banker One",
-                "company_name": "Imperial Capital",
-                "company_domain": "imperial.example",
-                "company_description": "middle-market investment bank",
-                "company_industry": "Capital Markets",
-            },
-            {
-                **good,
-                "full_name": "Advisor One",
-                "company_name": "Kroll",
-                "company_domain": "kroll.example",
-                "company_description": "global risk advisory and corporate investigations",
-            },
+                {
+                    **good,
+                    "full_name": "Tetsuji Okamoto",
+                    "email": "tetsuji@apollo.example",
+                    "company_domain": "apollo.example",
+                    "contact_country": "Japan",
+                    "company_hq_country": "Japan",
+                    "location": "Tokyo, Japan",
+                },
+                {
+                    **good,
+                    "full_name": "Selim Loukil",
+                    "email": "selim@advent.example",
+                    "title": "Head of PSG Europe",
+                    "company_domain": "advent.example",
+                },
+                {
+                    **good,
+                    "full_name": "Matt Sepulveda",
+                    "email": "matt@econ.example",
+                    "title": "Principal Economist",
+                    "company_domain": "econ.example",
+                },
+                {
+                    **good,
+                    "full_name": "Banker One",
+                    "email": "banker@imperial.example",
+                    "company_name": "Imperial Capital",
+                    "company_domain": "imperial.example",
+                    "company_description": "middle-market investment bank",
+                    "company_industry": "Capital Markets",
+                },
+                {
+                    **good,
+                    "full_name": "Advisor One",
+                    "email": "advisor@kroll.example",
+                    "company_name": "Kroll",
+                    "company_domain": "kroll.example",
+                    "company_description": "global risk advisory and corporate investigations",
+                },
         ],
     )
     assert result["delivered"] == 1
@@ -181,3 +188,6 @@ def test_pe_pipeline_drops_wrong_country_title_and_firm(tmp_path):
     assert result["dq_reasons"]["non_us_role"] == 1
     assert result["dq_reasons"]["non_deal_role"] == 1
     assert result["dq_reasons"]["not_pe_firm"] == 2
+    assert result["life_extraction"] == "heuristic"
+    assert "ANTHROPIC_API_KEY" in result["enrichment_warning"]
+    assert "OPENAI_API_KEY" in result["enrichment_warning"]
