@@ -42,10 +42,10 @@ SERIES_AB_FUNDING = [
     "series b extension",
 ]
 
+# Capital Markets and Investment Management pull banks and advisors. Post-filter
+# still drops firms that only advise private equity.
 PE_INDUSTRIES = [
     "Venture Capital and Private Equity Principals",
-    "Investment Management",
-    "Capital Markets",
 ]
 
 PE_TITLES = [
@@ -57,8 +57,9 @@ PE_TITLES = [
     "Operating Partner",
     "Equity Partner",
     "Principal",
-    "Independent Sponsor",
     "Managing Director",
+    "Founder",
+    "Co-Founder",
 ]
 
 PE_EXCLUDE_TITLES = [
@@ -69,6 +70,10 @@ PE_EXCLUDE_TITLES = [
     "Coordinator",
     "Executive Assistant",
     "Office Manager",
+    "Economist",
+    "Research",
+    "Investor Relations",
+    "Research Analyst",
 ]
 
 DEFAULT_FUNDED_SINCE = "2024-01-01"
@@ -121,8 +126,9 @@ def default_filters(
             "job_titles": list(PE_TITLES),
             "exclude_job_titles": list(PE_EXCLUDE_TITLES),
             "headquarters_countries": ["United States"],
+            "countries": ["United States"],
             "require_email": require_email,
-            "company_description": "private equity,buyout,lower middle market,lower-middle,independent sponsor",
+            "company_description": "private equity,buyout,growth equity,lower middle market,lower-middle",
         }
     else:
         filters = {

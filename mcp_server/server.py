@@ -97,6 +97,7 @@ def health() -> str:
                 "openai": bool(settings.openai_api_key),
             },
             "client_tag": settings.email_waterfall_client_tag,
+            "download_signing": _download_signing(),
             "exclude": {
                 "series_ab": store.exclude_count("series_ab"),
                 "pe_partners": store.exclude_count("pe_partners"),
@@ -170,7 +171,11 @@ def build_enriched_list(
                 "status": job.status,
                 "audience": name,
                 "requested": wanted,
-                "message": f"Poll get_job_status with job_id={job.id}. CSV only when done.",
+                "message": (
+                    f"Poll get_job_status with job_id={job.id}. "
+                    "When it finishes, call download_delivery to save the CSV. "
+                    "Do not paste the list into chat."
+                ),
             }
         )
     return _json(_run())
@@ -207,6 +212,11 @@ def fetch_job_result(job_id: str) -> str:
     if isinstance(result, dict):
         result.pop("rows", None)
         result.pop("contacts", None)
+        if result.get("csv_name") or result.get("csv_path"):
+            result["download_tool"] = "download_delivery"
+            result["download_note"] = (
+                "Call download_delivery with this job_id or csv_name. Do not paste the list into chat."
+            )
     return _json(public)
 
 
@@ -323,6 +333,50 @@ def list_deliveries(limit: int = 20) -> str:
     return _json(_store().list_deliveries(limit=limit))
 
 
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Download a delivery CSV",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+def download_delivery(job_id: str = "", filename: str = "") -> str:
+    """Return one delivery CSV by completed job id or delivery filename.
+
+    csv_text is the file. download_url is a 15-minute signed link when signing
+    is configured. Save the file locally. Do not paste the list into chat.
+    Samples on other tools stay redacted.
+    """
+    _ensure_cwd()
+    from mcp_server.jobs import get_job
+
+    from mobydick.downloads import build_delivery_download
+
+    job_status = None
+    job_csv = None
+    if (job_id or "").strip():
+        job = get_job(job_id)
+        job_status = job.status
+        result = job.result if isinstance(job.result, dict) else {}
+        job_csv = str(result.get("csv_name") or "")
+        if not job_csv and result.get("csv_path"):
+            job_csv = Path(str(result["csv_path"])).name
+    payload = build_delivery_download(
+        job_id=job_id,
+        filename=filename,
+        deliveries_dir=_store().settings.deliveries_dir,
+        job_status=job_status,
+        job_csv_name=job_csv,
+    )
+    return _json(payload)
+
+
+def _download_signing() -> bool:
+    from mobydick.downloads import signing_configured
+
+    return signing_configured()
+
+
 def _mount_http_routes() -> None:
     try:
         from starlette.requests import Request
@@ -336,6 +390,7 @@ def _mount_http_routes() -> None:
             "Moby Dick MCP\n"
             "Claude connector URL: /mcp\n"
             "Health: /health\n"
+            "Delivery CSV: signed link from the download_delivery tool\n"
         )
 
     @mcp.custom_route("/health", methods=["GET"])
@@ -348,6 +403,21 @@ def _mount_http_routes() -> None:
                 "mcp_path": "/mcp",
             }
         )
+
+    @mcp.custom_route("/deliveries/{filename}", methods=["GET"])
+    async def download_csv(request: Request):
+        from starlette.responses import Response
+
+        from mobydick.downloads import build_http_download
+
+        filename = request.path_params.get("filename", "")
+        status, body, headers = build_http_download(
+            filename,
+            request.query_params.get("exp", ""),
+            request.query_params.get("sig", ""),
+            deliveries_dir=_store().settings.deliveries_dir,
+        )
+        return Response(content=body, status_code=status, headers=headers)
 
 
 _mount_http_routes()

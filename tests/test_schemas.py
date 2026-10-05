@@ -17,3 +17,13 @@ def test_compact_sample_strips_sensitive_fields():
         }
     )
     assert sample == {"full_name": "Ada", "title": "CEO", "company_name": "Acme"}
+    leaked = compact_sample(
+        {
+            "full_name": "Pat",
+            "family_background": "parents ran a diner",
+            "quotes": "I still write letters",
+            "real_story": "long story",
+            "email": "pat@firm.com",
+        }
+    )
+    assert leaked == {"full_name": "Pat"}

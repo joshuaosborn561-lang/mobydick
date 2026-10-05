@@ -29,7 +29,14 @@ def test_series_ab_filters_drop_helper_keys():
 def test_pe_filters_drop_juniors():
     filters = default_filters("pe_partners")
     assert "Associate" in filters["exclude_job_titles"]
+    assert "Economist" in filters["exclude_job_titles"]
     assert "Partner" in filters["job_titles"]
+    assert "Founder" in filters["job_titles"]
+    assert filters["industries"] == ["Venture Capital and Private Equity Principals"]
+    assert filters["countries"] == ["United States"]
+    assert filters["headquarters_countries"] == ["United States"]
+    assert "Capital Markets" not in filters["industries"]
+    assert "Investment Management" not in filters["industries"]
 
 
 def test_wire_filters_match_getleads_search_schema():
@@ -39,6 +46,7 @@ def test_wire_filters_match_getleads_search_schema():
         "job_titles",
         "exclude_job_titles",
         "headquarters_countries",
+        "countries",
         "require_email",
         "company_description",
         "funding_types",

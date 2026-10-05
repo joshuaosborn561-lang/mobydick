@@ -16,14 +16,14 @@ Pipeline:
 2. De-dupe against the running exclude list AND same-day delivery files.
 3. One person per company.
 4. Fill missing emails via Josh's email-waterfall (GetLeads, Smartlead, AI Ark, LeadMagic). LeadMagic also fills the CSV when the waterfall MCP cannot return payloads.
-5. Emotional / personal enrichment from public sources only.
+5. Emotional / personal enrichment from public sources only. For PE, cite hometown, family, college, military service, early jobs, causes, life events, and direct quotes. Leave a field empty when no source states it. Confidence is high only when several concrete life facts are cited. YouTube, Taddy, and Apify are used for that research.
 6. Public office mailing address only. Never a home address. Never invent. Blank if none.
 7. DQ rows that are not a fit.
 8. Write one CSV. Return counts and at most 10 sample names. Never paste the list into chat.
 
 Series A/B default filter: US HQ, SaaS / software / subscription, CEO or Founder, last round Series A or B, funded since 2024-01-01, require email, one per company.
 
-PE default filter: US HQ, partners / principals / independent sponsors at lower-middle-market PE. Drop associates, assistants, analysts.
+PE default filter: US-based person at a US-HQ private equity, growth-equity, or buyout firm. Titles are Partner, Managing Partner, Managing Director, Principal, Founder, Co-founder, or Operating Partner. Match those titles as words, not substrings. Drop associates, assistants, analysts, research, economist, investor relations, portfolio technology or data or AI heads, cyber, credit-only, and any non-US region in the title. Drop investment banks, risk advisors, and firms that only advise private equity. firm_type is classified from the description. It is never assumed.
 
 Weekly Monday run: about 100 fresh Series A/B founders, zero overlap vs prior weeks.
 
@@ -48,6 +48,8 @@ After every delivery the new company domains are added automatically.
 ## Jobs
 
 Long pulls run in the background. Poll get_job_status. fetch_job_result returns the CSV path plus counts and samples, never the full file.
+
+To get the file onto the operator's machine, call download_delivery with the job_id or the delivery filename. It returns csv_text and, when signing is configured, a 15-minute download_url. Save the file. Do not paste the rows into chat. list_deliveries and fetch_job_result stay redacted.
 
 ## Copy
 
