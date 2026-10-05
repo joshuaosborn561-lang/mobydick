@@ -30,3 +30,20 @@ def test_pe_filters_drop_juniors():
     filters = default_filters("pe_partners")
     assert "Associate" in filters["exclude_job_titles"]
     assert "Partner" in filters["job_titles"]
+
+
+def test_wire_filters_match_getleads_search_schema():
+    """Names GetLeads SearchFilters still accepts. Classic column names are not filters."""
+    allowed = {
+        "industries",
+        "job_titles",
+        "exclude_job_titles",
+        "headquarters_countries",
+        "require_email",
+        "company_description",
+        "funding_types",
+    }
+    for audience in ("pe_partners", "series_ab"):
+        wire = getleads_search_args(default_filters(audience))
+        assert set(wire) <= allowed
+        assert "funded_since" not in wire

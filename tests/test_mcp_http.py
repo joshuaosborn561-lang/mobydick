@@ -1,6 +1,8 @@
 import json
 
-from mobydick.mcp_http import extract_tool_result, parse_mcp_response
+import pytest
+
+from mobydick.mcp_http import McpError, extract_tool_result, parse_mcp_response, tool_error_detail
 
 
 class _Resp:
@@ -34,3 +36,20 @@ def test_extract_tool_result_from_text_json():
         }
     )
     assert parsed["total"] == 3
+
+
+def test_is_error_keeps_upstream_body():
+    detail = 'invalid_columns: ["title","email"]. column_replacements: {"title":"current_title"}'
+    with pytest.raises(McpError) as caught:
+        extract_tool_result(
+            {
+                "result": {
+                    "isError": True,
+                    "content": [{"type": "text", "text": detail}],
+                }
+            }
+        )
+    assert "invalid_columns" in str(caught.value)
+    assert caught.value.body == detail
+    assert caught.value.is_tool_error is True
+    assert tool_error_detail({"content": [{"type": "text", "text": detail}]}) == detail

@@ -67,24 +67,26 @@ SAMPLE_SAFE_FIELDS = (
     "location",
 )
 
+# Current GetLeads catalog names (Swarm dataset). Classic names such as
+# title, email, location, headquarters_country, funding_type, funding_amount,
+# and funding_date make search_contacts return invalid_columns.
 GETLEADS_EXPORT_COLUMNS = [
     "first_name",
     "last_name",
     "full_name",
-    "title",
-    "email",
+    "current_title",
+    "work_email",
     "linkedin_url",
     "company_name",
     "company_domain",
     "company_website",
+    "current_employer_website",
     "company_description",
-    "location",
-    "headquarters_country",
-    "funding_type",
+    "contact_location",
+    "company_hq_country",
+    "company_industry",
     "last_funding_type",
-    "funding_amount",
     "last_funding_amount",
-    "funding_date",
     "last_funding_date",
     "total_funding_amount",
 ]
