@@ -21,6 +21,7 @@ _NON_DEAL_TOKENS = {
     "marketing",
     "compliance",
     "ir",
+    "cfo",
 }
 _NON_DEAL_PHRASES = (
     ("investor", "relations"),
@@ -41,6 +42,8 @@ _NON_DEAL_PHRASES = (
     ("chief", "technology"),
     ("chief", "data"),
     ("chief", "information"),
+    ("chief", "financial"),
+    ("chief", "financial", "officer"),
 )
 
 _REGION_TOKENS = {
@@ -247,7 +250,21 @@ _FOR_PE = re.compile(
 )
 _BUYOUT = re.compile(r"\b(?:buyouts?|leveraged buyout|lbo)\b", re.IGNORECASE)
 _GROWTH = re.compile(r"\bgrowth[ -]?equity\b", re.IGNORECASE)
-_PE = re.compile(r"\b(?:private equity|independent sponsor)\b", re.IGNORECASE)
+_PE = re.compile(
+    r"\b(?:private equity (?:firm|fund|funds|partnership|group|sponsor)|"
+    r"independent sponsor|"
+    r"(?:focused on|speciali[sz]\w+ in|invest\w+ in) private equity)\b",
+    re.IGNORECASE,
+)
+_BROKER = re.compile(
+    r"\b(?:broker-dealer|broker dealer|finra|series 7|series 63|registered representative)\b",
+    re.IGNORECASE,
+)
+_VC_FIRM = re.compile(r"\b(?:venture capital|venture fund|vc fund)\b", re.IGNORECASE)
+_NAMED_FIRM = re.compile(
+    r"\b(?:private equity|buyout|growth equity)\s+(?:firm|fund|funds|partnership)\b",
+    re.IGNORECASE,
+)
 _BANK = re.compile(
     r"\b(?:investment bank|investment banking|m\s*&\s*a advisory|"
     r"sell-side advisor|sell side advisor|capital markets advisory)\b",
@@ -369,10 +386,36 @@ def _strip_advisory(text: str) -> str:
     return cleaned
 
 
-def classify_firm(name: str, description: str, industry: str = "") -> str:
+def _same_org(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    return left == right or left.endswith("." + right) or right.endswith("." + left)
+
+
+def _looks_like_vc(name: str, description: str, domain: str) -> bool:
+    host = (domain or "").lower().strip(".")
+    if host.endswith(".vc"):
+        return True
+    blob = f"{name or ''} {description or ''}"
+    if _VC_FIRM.search(blob):
+        return True
+    if re.search(r"\bventures?\b", name or "", re.IGNORECASE):
+        if _NAMED_FIRM.search(description or ""):
+            return False
+        return True
+    return False
+
+
+def classify_firm(name: str, description: str, industry: str = "", domain: str = "") -> str:
     """Honest firm label. Unknown stays unknown. Never defaults to private equity."""
     blob = _strip_advisory(f"{name or ''} {description or ''}")
     industry_text = (industry or "").lower()
+    if _BROKER.search(blob):
+        return "broker-dealer"
+    if _looks_like_vc(name, description, domain):
+        return "venture capital"
+    if re.search(r"\bholdings\b", name or "", re.IGNORECASE) and not _NAMED_FIRM.search(blob) and not _PE.search(blob):
+        return "unknown"
     if _BUYOUT.search(blob):
         return "buyout"
     if _GROWTH.search(blob):
@@ -388,17 +431,105 @@ def classify_firm(name: str, description: str, industry: str = "") -> str:
     return "unknown"
 
 
+_TITLE_WORDS = {
+    "partner",
+    "capital",
+    "managing",
+    "director",
+    "equity",
+    "group",
+    "fund",
+    "ventures",
+    "venture",
+    "holdings",
+    "principal",
+    "founder",
+    "president",
+    "officer",
+    "financial",
+    "chief",
+}
+
+
+def truncated_last_name(last: str) -> bool:
+    letters = re.sub(r"[^A-Za-z]", "", last or "")
+    return len(letters) <= 1
+
+
+def last_name_from_linkedin(url: str, first: str) -> str:
+    """Use a hyphenated LinkedIn slug. Compact slugs like scottpjensen are not guessed."""
+    if not url or not first:
+        return ""
+    slug = url.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+    words = [part for part in slug.split("-") if part and not re.search(r"\d", part)]
+    if len(words) < 2:
+        return ""
+    if words[0].lower() != re.sub(r"[^a-z]", "", first.lower()):
+        return ""
+    last = words[-1]
+    if len(last) < 2 or last.lower() in _TITLE_WORDS:
+        return ""
+    return last[:1].upper() + last[1:]
+
+
+def last_name_from_text(first: str, text: str) -> str:
+    if not first or not text:
+        return ""
+    pattern = re.compile(rf"\b{re.escape(first)}\s+([A-Z][a-zA-Z'’-]{{2,}})\b")
+    for match in pattern.finditer(text):
+        candidate = match.group(1)
+        if candidate.lower() in _TITLE_WORDS:
+            continue
+        return candidate
+    return ""
+
+
+def align_firm_domain(raw: dict[str, str]) -> tuple[str, str]:
+    """Return the firm domain and a dq code when the email domain is a different org."""
+    from mobydick.domains import normalize_domain
+
+    website = normalize_domain(raw.get("company_website") or "")
+    listed = normalize_domain(raw.get("company_domain") or "")
+    email_domain = normalize_domain(raw.get("email") or "")
+    firm = website or listed
+    if email_domain and firm and not _same_org(email_domain, firm):
+        return listed or firm, "email_domain_mismatch"
+    if website and (not email_domain or _same_org(email_domain, website)):
+        return website, ""
+    return listed or firm, ""
+
+
+def page_disqualifies_firm(page_text: str) -> str:
+    """A team page can show a broker-dealer that the short description hid."""
+    if _BROKER.search(page_text or ""):
+        return "broker-dealer"
+    return ""
+
+
 def assess_pe(raw: dict[str, str]) -> dict[str, str]:
-    """Return firm_type and a dq reason. Empty dq means the row can ship."""
+    """Return firm_type, dq, and any corrected name or domain. Empty dq can still ship."""
+    domain, domain_dq = align_firm_domain(raw)
+    first = (raw.get("first_name") or "").strip()
+    last = (raw.get("last_name") or "").strip()
+    full = (raw.get("full_name") or "").strip()
+    if truncated_last_name(last):
+        resolved = last_name_from_linkedin(raw.get("linkedin_url") or "", first)
+        if resolved:
+            last = resolved
+            full = f"{first} {last}".strip()
     firm_type = classify_firm(
         raw.get("company_name") or "",
         raw.get("company_description") or "",
         raw.get("company_industry") or "",
+        domain,
     )
-    if not (raw.get("full_name") or "").strip():
+    unresolved = "yes" if truncated_last_name(last) else ""
+    if not full:
         reason = "missing_name"
-    elif not (raw.get("company_domain") or "").strip():
+    elif not (domain or raw.get("company_domain") or "").strip():
         reason = "missing_domain"
+    elif domain_dq:
+        reason = domain_dq
     else:
         reason = title_reason(raw.get("title") or "")
         if not reason and not person_is_us(raw.get("contact_country") or "", raw.get("location") or ""):
@@ -407,4 +538,12 @@ def assess_pe(raw: dict[str, str]) -> dict[str, str]:
             reason = "not_us_hq"
         if not reason and firm_type not in KEEP_FIRM_TYPES:
             reason = "not_pe_firm"
-    return {"firm_type": firm_type, "dq": reason}
+    return {
+        "firm_type": firm_type,
+        "dq": reason,
+        "company_domain": domain,
+        "first_name": first,
+        "last_name": last,
+        "full_name": full,
+        "unresolved_name": unresolved,
+    }

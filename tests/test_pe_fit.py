@@ -87,7 +87,9 @@ def test_firm_type_is_honest():
     assert kroll["dq"] == "not_pe_firm"
 
 
-def test_enrichment_does_not_invent_private_equity_or_a_life_story():
+def test_enrichment_does_not_invent_private_equity_or_a_life_story(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     row = apply_enrichment(_pe(company_description="", company_industry=""), "pe_partners", fetch_pages=False)
     assert row["firm_type"] == "unknown"
     assert row["dq"] == "not_pe_firm"
@@ -98,4 +100,70 @@ def test_enrichment_does_not_invent_private_equity_or_a_life_story():
     assert kept["dq"] == ""
     assert kept["firm_type"] == "private equity"
     assert kept["confidence"] == "low"
-    assert "not found" in kept["research_note"].lower() or "Empty means not found" in kept["research_note"]
+    assert "Empty means not found" in kept["research_note"]
+    assert "ANTHROPIC_API_KEY" in kept["research_note"]
+
+
+def test_email_domain_must_match_the_firm_and_cfo_is_out():
+    mismatch = assess_pe(
+        _pe(
+            full_name="James S.",
+            first_name="James",
+            last_name="S.",
+            email="james@salesforce.com",
+            company_domain="salesforce.com",
+            company_website="https://allyengage.com",
+            linkedin_url="https://www.linkedin.com/in/james84711",
+        )
+    )
+    assert mismatch["dq"] == "email_domain_mismatch"
+    ted = assess_pe(
+        _pe(
+            full_name="Chris Anderson",
+            email="chris@ted.com",
+            company_domain="allaboard.vc",
+            company_website="https://allaboard.vc",
+            company_description="growth equity fund",
+        )
+    )
+    assert ted["dq"] in {"email_domain_mismatch", "not_pe_firm"}
+    assert classify_firm("All Aboard Fund", "growth equity firm", "", "allaboard.vc") == "venture capital"
+    assert classify_firm("2.0 Ventures", "focused on buyouts", "") == "venture capital"
+    assert title_reason("Chief Financial Officer/Operating Partner") == "non_deal_role"
+    assert classify_firm("Allele Capital", "private equity firm and FINRA Series 7 broker-dealer", "") == "broker-dealer"
+    assert classify_firm("Ampersand Holdings", "a diversified holdings company", "") == "unknown"
+    fixed = assess_pe(
+        _pe(
+            full_name="Kerry Wei",
+            email="kerry@prysmcapital.com",
+            company_domain="alembic.com",
+            company_website="https://prysmcapital.com",
+            company_description="growth equity firm",
+        )
+    )
+    assert fixed["dq"] == ""
+    assert fixed["company_domain"] == "prysmcapital.com"
+
+
+def test_truncated_last_name_resolves_only_from_a_real_slug():
+    resolved = assess_pe(
+        _pe(
+            full_name="Scott J.",
+            first_name="Scott",
+            last_name="J.",
+            linkedin_url="https://www.linkedin.com/in/scott-jensen",
+        )
+    )
+    assert resolved["last_name"] == "Jensen"
+    assert resolved["full_name"] == "Scott Jensen"
+    assert resolved["unresolved_name"] == ""
+    stuck = assess_pe(
+        _pe(
+            full_name="Mike T.",
+            first_name="Mike",
+            last_name="T.",
+            linkedin_url="https://www.linkedin.com/in/mthompson123",
+        )
+    )
+    assert stuck["unresolved_name"] == "yes"
+    assert stuck["dq"] == ""

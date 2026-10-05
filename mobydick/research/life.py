@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+from dataclasses import replace
 from typing import Any
 from urllib.parse import urljoin
 
+from mobydick.config import settings as default_settings
 from mobydick.research.apify import linkedin_posts
+from mobydick.research.extract import llm_extract
 from mobydick.research.taddy import search_episodes
 from mobydick.research.web import company_url, fetch_text
 from mobydick.research.youtube import talks_with_transcripts
@@ -16,6 +20,77 @@ logger = logging.getLogger("mobydick.research.life")
 
 TEAM_PATHS = ("/team", "/people", "/leadership", "/our-team", "/about")
 RESEARCH_NOTE = "Public sources only. Empty means not found. No home address."
+NO_MODEL_WARNING = (
+    "No ANTHROPIC_API_KEY or OPENAI_API_KEY is set. "
+    "PE life extraction is heuristic only and leaves a field empty when it is not sure. "
+    "Set ANTHROPIC_API_KEY or OPENAI_API_KEY to turn on cited model extraction."
+)
+
+_NAME_WORD = r"[A-Z][A-Za-z\u00C0-\u024F'’-]*"
+_BIO_START = re.compile(
+    rf"\b({_NAME_WORD}(?:\s+[A-Z]\.)?\s+{_NAME_WORD})\s*[,:|\-–—]?\s+"
+    r"(?=(?i:Vice President|Principal|Managing Director|Managing Partner|Operating Partner|"
+    r"Partner|Director|Founder|Co-Founder|President|CFO|Associate|Analyst)\b)",
+)
+_NAV = (
+    "about us",
+    "our approach",
+    "contact us",
+    "investment criteria",
+    "search funds",
+    "privacy policy",
+    "cookie",
+    "skip to",
+    "working with management",
+    "working with sellers",
+)
+_NOT_A_PERSON = {
+    "university",
+    "college",
+    "group",
+    "capital",
+    "partners",
+    "fund",
+    "foundation",
+    "states",
+    "state",
+    "operations",
+    "holdings",
+    "ventures",
+    "venture",
+    "equity",
+    "street",
+    "avenue",
+    "lane",
+    "road",
+    "drive",
+    "court",
+    "boulevard",
+    "way",
+    "place",
+    "park",
+    "team",
+    "board",
+    "conferences",
+    "school",
+    "institute",
+    "battalion",
+    "principal",
+    "partner",
+    "director",
+    "president",
+    "founder",
+    "managing",
+    "chief",
+    "vice",
+    "analyst",
+    "associate",
+    "officer",
+}
+_RESUME = re.compile(
+    r"\b(years of experience|series 7|series 63|finra|progressively senior)\b",
+    re.IGNORECASE,
+)
 
 _STREET = re.compile(
     r"\b\d{1,6}\s+[A-Za-z0-9.\- ]{2,40}\s+"
@@ -59,7 +134,7 @@ _EVENTS = re.compile(
     re.IGNORECASE,
 )
 _WHY = re.compile(r"\b(private equity|buyout|growth equity)\b", re.IGNORECASE)
-_WHY_PERSONAL = re.compile(r"\b(got into|joined|left|because|started)\b", re.IGNORECASE)
+_WHY_PERSONAL = re.compile(r"\b(got into|left|because|started)\b", re.IGNORECASE)
 
 _LIFE_KEYS = (
     "hometown",
@@ -130,10 +205,124 @@ def _blocked(sentence: str) -> bool:
     return _STREET.search(sentence) is not None
 
 
-def _about_person(sentence: str, last: str, source_names_person: bool) -> bool:
+def llm_keys_present() -> bool:
+    return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip() or os.environ.get("OPENAI_API_KEY", "").strip())
+
+
+def _split_name(full_name: str) -> tuple[str, str]:
+    parts = [part for part in re.split(r"\s+", (full_name or "").strip()) if part]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[-1].strip(".,")
+
+
+def _other_people(sentence: str, first: str, last: str) -> list[str]:
+    found: list[str] = []
+    for match in re.finditer(rf"\b({_NAME_WORD})\s+({_NAME_WORD})\b", sentence or ""):
+        left, right = match.group(1), match.group(2)
+        if len(left) < 3 or len(right) < 3:
+            continue
+        if right.lower() in _NOT_A_PERSON or left.lower() in _NOT_A_PERSON:
+            continue
+        if first and left.lower() == first.lower() and last and right.lower() == last.lower():
+            continue
+        found.append(f"{left} {right}")
+    return found
+
+
+def is_junk(text: str) -> bool:
+    """Nav, menus, and lists of other people's names are not a life story."""
+    if not text:
+        return True
+    lowered = text.lower()
+    if sum(1 for phrase in _NAV if phrase in lowered) >= 2:
+        return True
+    return len(_other_people(text, "", "")) >= 3
+
+
+def _heading_is_person(heading: str, first: str, last: str) -> bool:
+    tokens = [re.sub(r"[^A-Za-z\u00C0-\u024F'’-]", "", token) for token in heading.split()]
+    tokens = [token for token in tokens if token]
+    if not tokens or not last:
+        return False
+    if tokens[-1].lower() != last.lower():
+        return False
+    if not first:
+        return True
+    return tokens[0].lower() == first.lower()
+
+
+def _unique_last_name(first: str, text: str) -> str:
+    """The only surname written next to this first name. Empty when none or several."""
+    if not first or not text:
+        return ""
+    pattern = re.compile(rf"\b{re.escape(first)}\s+([A-Z][A-Za-z\u00C0-\u024F'’-]{{2,}})\b")
+    found: list[str] = []
+    for match in pattern.finditer(text):
+        candidate = match.group(1)
+        if candidate.lower() in _NOT_A_PERSON:
+            continue
+        if candidate.lower() not in {item.lower() for item in found}:
+            found.append(candidate)
+    if len(found) != 1:
+        return ""
+    return found[0]
+
+
+def passage_for_identity(text: str, first: str, last: str) -> str:
+    """Pick this person's bio. An initial last name is resolved only when one surname fits."""
+    letters = re.sub(r"[^A-Za-z]", "", last or "")
+    use_last = last
+    if len(letters) <= 1:
+        use_last = _unique_last_name(first, text)
+        if not use_last:
+            return ""
+    return bio_for(text, first, use_last)
+
+
+def bio_for(text: str, first: str, last: str) -> str:
+    """Keep the block under this person's heading. Drop the rest of a team page."""
+    matches = list(_BIO_START.finditer(text or ""))
+    if not matches:
+        if is_junk(text):
+            return ""
+        if _mentions(text, last) and (not first or _mentions(text, first)) and not _other_people(text, first, last):
+            return text
+        return ""
+    pieces: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.start(1)
+        end = matches[index + 1].start(1) if index + 1 < len(matches) else len(text)
+        if _heading_is_person(match.group(1), first, last):
+            pieces.append(text[start:end])
+    return " ".join(pieces).strip()
+
+
+def passage_for_source(source: dict[str, str], first: str, last: str) -> str:
+    title = source.get("title") or source.get("name") or ""
+    text = source.get("text") or source.get("transcript") or source.get("description") or ""
+    kind = (source.get("kind") or "").lower()
+    titled = _mentions(title, last) and (not first or _mentions(title, first))
+    if kind in {"interview", "podcast", "transcript"} and titled:
+        return "" if is_junk(text) else text
+    if kind == "interview" and "linkedin" in (source.get("url") or "").lower():
+        if is_junk(text) or _other_people(text, first, last):
+            return ""
+        return text if _mentions(text, last) else ""
+    return bio_for(text, first, last)
+
+
+def _sentence_about(sentence: str, first: str, last: str, passage_is_theirs: bool) -> bool:
+    if _blocked(sentence) or is_junk(sentence):
+        return False
+    others = _other_people(sentence, first, last)
+    if others:
+        return False
     if _mentions(sentence, last):
         return True
-    return bool(source_names_person and _ABOUT.search(sentence))
+    return bool(passage_is_theirs and _ABOUT.search(sentence))
 
 
 def _quote_ok(source: dict[str, str]) -> bool:
@@ -151,26 +340,40 @@ def _blank() -> dict[str, str]:
     return fields
 
 
-def extract_life_story(full_name: str, sources: list[dict[str, str]]) -> dict[str, str]:
-    """Copy sentences from sources that name the person. Never paraphrase."""
-    last = last_name_of(full_name)
+def _usable_passages(full_name: str, sources: list[dict[str, str]]) -> list[dict[str, str]]:
+    first, last = _split_name(full_name)
+    passages: list[dict[str, str]] = []
+    for source in sources:
+        text = passage_for_source(source, first, last)
+        if not text:
+            continue
+        passages.append(
+            {
+                "url": source.get("url") or "",
+                "title": source.get("title") or source.get("name") or "",
+                "text": text,
+                "kind": source.get("kind") or "",
+            }
+        )
+    return passages
+
+
+def _heuristic_from_passages(full_name: str, passages: list[dict[str, str]]) -> tuple[dict[str, str], dict[str, str]]:
+    first, last = _split_name(full_name)
     found: dict[str, str] = {key: "" for key in (*_LIFE_KEYS, "why")}
     cites: dict[str, str] = {}
-    story: list[str] = []
-
-    for source in sources:
-        text = source.get("text") or source.get("transcript") or source.get("description") or ""
-        title = source.get("title") or source.get("name") or ""
-        if not (_mentions(text, last) or _mentions(title, last)):
-            continue
-        source_names = _mentions(f"{title} {text[:400]}", last)
+    for source in passages:
         url = source.get("url") or ""
-        for sentence in _sentences(text):
-            if _blocked(sentence) or not _about_person(sentence, last, source_names):
+        titled = _mentions(source.get("title") or "", last) and (not first or _mentions(source.get("title") or "", first))
+        passage_is_theirs = titled or _heading_is_person(source.get("text") or "", first, last) or not _other_people(source.get("text") or "", first, last)
+        for sentence in _sentences(source.get("text") or ""):
+            if not _sentence_about(sentence, first, last, passage_is_theirs):
+                continue
+            if _RESUME.search(sentence) and not (
+                _HOMETOWN.search(sentence) or _FAMILY.search(sentence) or _MILITARY.search(sentence) or _COLLEGE.search(sentence)
+            ):
                 continue
             clipped = _clip(sentence)
-            if clipped not in story:
-                story.append(clipped)
             hometown_hit = _HOMETOWN.search(sentence) and not _FIRM_VOICE.search(sentence)
             _take(found, cites, "hometown", hometown_hit, clipped, url)
             _take(found, cites, "family_background", _FAMILY.search(sentence), clipped, url)
@@ -183,9 +386,78 @@ def extract_life_story(full_name: str, sources: list[dict[str, str]]) -> dict[st
                 _take(found, cites, "why", True, clipped, url)
             if _quote_ok(source):
                 quoted = _QUOTE.search(sentence)
-                if quoted:
+                if quoted and _sentence_about(quoted.group(1), first, last, True):
                     _take(found, cites, "quotes", True, _clip(quoted.group(1)), url)
+    return found, cites
 
+
+def _ground_quote(value: str, corpus: str) -> str:
+    quote = re.sub(r"\s+", " ", (value or "")).strip().strip("\"'")
+    if len(quote) < 12:
+        return ""
+    compact = re.sub(r"\s+", " ", corpus or "")
+    if quote in compact:
+        return quote
+    index = compact.lower().find(quote.lower())
+    if index < 0:
+        return ""
+    return compact[index : index + len(quote)]
+
+
+def _cite_for(quote: str, passages: list[dict[str, str]]) -> str:
+    folded = re.sub(r"\s+", " ", quote).lower()
+    for source in passages:
+        if folded in re.sub(r"\s+", " ", source.get("text") or "").lower():
+            return source.get("url") or ""
+    return ""
+
+
+def _llm_fill(full_name: str, firm: str, passages: list[dict[str, str]], found: dict[str, str], cites: dict[str, str]) -> None:
+    if not passages or not llm_keys_present():
+        return
+    first, last = _split_name(full_name)
+    blocks = []
+    for source in passages[:6]:
+        blocks.append(f"URL: {source.get('url') or ''}\n{(source.get('text') or '')[:2500]}")
+    prompt = (
+        f"Extract personal facts for a handwritten letter about {full_name}"
+        + (f" at {firm}" if firm else "")
+        + ".\n"
+        f"Use only facts explicitly about {full_name}. Ignore coworkers, menus, and lists of other people.\n"
+        "Every value must be a verbatim quote copied from the sources. If you are not sure, use an empty string.\n"
+        "Do not infer, summarize, or combine facts. No home addresses.\n"
+        "Return JSON with keys hometown, family_background, college, military_service, early_jobs, why, causes, life_events, quotes.\n"
+        "Sources:\n" + "\n\n".join(blocks)
+    )
+    cfg = replace(
+        default_settings,
+        anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
+        openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
+    )
+    parsed = llm_extract(prompt, settings=cfg) or {}
+    corpus = "\n".join(source.get("text") or "" for source in passages)
+    for key in (*_LIFE_KEYS, "why"):
+        if found.get(key):
+            continue
+        grounded = _ground_quote(str(parsed.get(key) or ""), corpus)
+        if not grounded or is_junk(grounded) or not _sentence_about(grounded, first, last, True):
+            continue
+        found[key] = _clip(grounded)
+        url = _cite_for(grounded, passages)
+        if url:
+            cites[key] = url
+
+
+def extract_life_story(
+    full_name: str,
+    sources: list[dict[str, str]],
+    *,
+    firm: str = "",
+) -> dict[str, str]:
+    """Copy sentences from the named person's own passage. Never paraphrase."""
+    passages = _usable_passages(full_name, sources)
+    found, cites = _heuristic_from_passages(full_name, passages)
+    _llm_fill(full_name, firm, passages, found, cites)
     out = _blank()
     out.update(found)
     filled = [key for key in _LIFE_KEYS if found[key]]
@@ -193,6 +465,11 @@ def extract_life_story(full_name: str, sources: list[dict[str, str]]) -> dict[st
         out["confidence"] = "high"
     elif filled:
         out["confidence"] = "medium"
+    story = []
+    for key in _HOOK_ORDER:
+        value = found.get(key) or ""
+        if value and value not in story:
+            story.append(value)
     out["real_story"] = " ".join(story[:3])
     for key in _HOOK_ORDER:
         if found.get(key):
@@ -206,6 +483,8 @@ def extract_life_story(full_name: str, sources: list[dict[str, str]]) -> dict[st
         if url:
             parts.append(f"{_FIELD_SOURCE[key]}={url}")
     out["sources"] = " | ".join(parts)
+    if not llm_keys_present():
+        out["research_note"] = f"{RESEARCH_NOTE} {NO_MODEL_WARNING}"
     return out
 
 
@@ -244,16 +523,27 @@ def gather_person_sources(row: dict[str, str]) -> list[dict[str, str]]:
     last = row.get("last_name") or last_name_of(full)
     firm = row.get("company_name") or ""
     base = company_url(row.get("company_website") or "", row.get("company_domain") or "")
+    first = row.get("first_name") or _split_name(full)[0]
+    paths = list(TEAM_PATHS)
+    if first and last and len(re.sub(r"[^A-Za-z]", "", last)) > 1:
+        slug = re.sub(r"[^a-z-]", "", f"{first}-{last}".lower())
+        if slug:
+            paths.extend((f"/team/{slug}", f"/people/{slug}", f"/leadership/{slug}"))
     if base and last:
-        for path in TEAM_PATHS:
+        seen_urls: set[str] = set()
+        for path in paths:
             url = urljoin(base + "/", path.lstrip("/"))
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
             try:
                 text = fetch_text(url)
             except Exception:
                 logger.exception("bio page failed for %s", url)
                 text = ""
-            if text and _mentions(text, last):
-                sources.append({"url": url, "title": f"{firm} bio", "text": text[:8000], "kind": "bio"})
+            passage = passage_for_identity(text, first, last) if text else ""
+            if passage:
+                sources.append({"url": url, "title": f"{firm} bio", "text": passage[:8000], "kind": "bio"})
     try:
         talks = talks_with_transcripts(full, firm, max_videos=2)
     except Exception:

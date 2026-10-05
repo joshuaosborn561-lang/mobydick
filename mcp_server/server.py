@@ -98,6 +98,7 @@ def health() -> str:
             },
             "client_tag": settings.email_waterfall_client_tag,
             "download_signing": _download_signing(),
+            "life_extraction": _life_extraction_status(settings),
             "exclude": {
                 "series_ab": store.exclude_count("series_ab"),
                 "pe_partners": store.exclude_count("pe_partners"),
@@ -369,6 +370,19 @@ def download_delivery(job_id: str = "", filename: str = "") -> str:
         job_csv_name=job_csv,
     )
     return _json(payload)
+
+
+def _life_extraction_status(settings: Any) -> dict[str, Any]:
+    from mobydick.research.life import NO_MODEL_WARNING, llm_keys_present
+
+    enabled = llm_keys_present() or bool(
+        getattr(settings, "anthropic_api_key", "") or getattr(settings, "openai_api_key", "")
+    )
+    return {
+        "mode": "llm" if enabled else "heuristic",
+        "env": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+        "warning": "" if enabled else NO_MODEL_WARNING,
+    }
 
 
 def _download_signing() -> bool:

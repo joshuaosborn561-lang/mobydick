@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from mobydick.audiences import PE_PARTNERS, normalize_audience
-from mobydick.pe_fit import assess_pe
+from mobydick.pe_fit import assess_pe, last_name_from_text, page_disqualifies_firm
 from mobydick.research.extract import extract_person_fields
-from mobydick.research.life import extract_life_story, gather_person_sources
+from mobydick.research.life import NO_MODEL_WARNING, extract_life_story, gather_person_sources, llm_keys_present
 from mobydick.research.web import gather_company_pages
 from mobydick.schemas import empty_row
 from mobydick.store import LIST_PE
@@ -46,6 +46,14 @@ def apply_enrichment(
         row["source_notes"] = raw.get("source_note") or raw.get("source_notes") or "getleads"
         screened = assess_pe({**raw, **{k: v for k, v in row.items() if v}})
         row["firm_type"] = screened["firm_type"]
+        if screened.get("company_domain"):
+            row["company_domain"] = screened["company_domain"]
+        if screened.get("full_name"):
+            row["full_name"] = screened["full_name"]
+        if screened.get("first_name"):
+            row["first_name"] = screened["first_name"]
+        if screened.get("last_name"):
+            row["last_name"] = screened["last_name"]
     else:
         row["source_note"] = raw.get("source_note") or "getleads"
         row["funding_round"] = raw.get("funding_round") or ""
@@ -63,23 +71,53 @@ def apply_enrichment(
 
     if name == PE_PARTNERS:
         life_sources: list[dict[str, str]] = []
+        if screened.get("unresolved_name") and not pe_dq and not fetch_pages:
+            pe_dq = "truncated_name"
         if fetch_pages and not pe_dq:
             life_sources = gather_person_sources(row)
-        life = extract_life_story(row.get("full_name") or "", life_sources)
-        row["hometown_or_from"] = life["hometown"]
-        row["family_background"] = life["family_background"]
-        row["college"] = life["college"]
-        row["military_service"] = life["military_service"]
-        row["early_jobs"] = life["early_jobs"]
-        row["why_got_into_pe"] = life["why"]
-        row["beliefs_or_causes"] = life["causes"]
-        row["life_events"] = life["life_events"]
-        row["quotes"] = life["quotes"]
-        row["real_story"] = life["real_story"]
-        row["best_emotional_hook"] = life["hook"]
-        row["research_note"] = life["research_note"]
-        row["sources"] = life["sources"]
-        row["confidence"] = life["confidence"]
+            if screened.get("unresolved_name"):
+                resolved = last_name_from_text(
+                    row.get("first_name") or "",
+                    " ".join(source.get("text") or "" for source in life_sources),
+                )
+                if resolved:
+                    row["last_name"] = resolved
+                    row["full_name"] = f"{row.get('first_name') or ''} {resolved}".strip()
+                else:
+                    pe_dq = "truncated_name"
+                    life_sources = []
+        if pe_dq:
+            life_sources = []
+        elif life_sources:
+            page_text = " ".join(source.get("text") or "" for source in life_sources)[:6000]
+            revised = page_disqualifies_firm(f"{raw.get('company_description') or ''} {page_text}")
+            if revised:
+                row["firm_type"] = revised
+                pe_dq = "not_pe_firm"
+                life_sources = []
+        life = extract_life_story(row.get("full_name") or "", life_sources, firm=row.get("company_name") or "")
+        if pe_dq:
+            life = {key: "" for key in life}
+            life["confidence"] = "low"
+            life["research_note"] = life.get("research_note") or (
+                f"Public sources only. Empty means not found. No home address. {NO_MODEL_WARNING}"
+                if not llm_keys_present()
+                else "Public sources only. Empty means not found. No home address."
+            )
+        row["hometown_or_from"] = life.get("hometown") or ""
+        row["family_background"] = life.get("family_background") or ""
+        row["college"] = life.get("college") or ""
+        row["military_service"] = life.get("military_service") or ""
+        row["early_jobs"] = life.get("early_jobs") or ""
+        row["why_got_into_pe"] = life.get("why") or ""
+        row["beliefs_or_causes"] = life.get("causes") or ""
+        row["life_events"] = life.get("life_events") or ""
+        row["quotes"] = life.get("quotes") or ""
+        row["real_story"] = life.get("real_story") or ""
+        row["best_emotional_hook"] = life.get("hook") or ""
+        row["research_note"] = life.get("research_note") or ""
+        row["sources"] = life.get("sources") or ""
+        row["confidence"] = life.get("confidence") or "low"
         row["dq"] = pe_dq
     else:
         extracted = extract_person_fields(

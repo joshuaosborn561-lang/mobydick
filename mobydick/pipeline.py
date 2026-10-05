@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
+
+logger = logging.getLogger("mobydick.pipeline")
 
 from mobydick.audiences import (
     DEFAULT_FUNDED_SINCE,
@@ -107,6 +110,14 @@ def build_enriched_list(
         passing: list[dict[str, str]] = []
         for row in fresh:
             verdict = assess_pe(row)
+            if verdict.get("company_domain"):
+                row["company_domain"] = verdict["company_domain"]
+            if verdict.get("full_name"):
+                row["full_name"] = verdict["full_name"]
+            if verdict.get("first_name"):
+                row["first_name"] = verdict["first_name"]
+            if verdict.get("last_name"):
+                row["last_name"] = verdict["last_name"]
             if verdict["dq"]:
                 early_dq.append({"dq": verdict["dq"], "firm_type": verdict["firm_type"]})
                 continue
@@ -124,7 +135,7 @@ def build_enriched_list(
     path = store.write_delivery(name, delivered)
 
     samples = [compact_sample(row) for row in delivered[:10]]
-    return {
+    payload = {
         "ok": True,
         "audience": name,
         "requested": wanted,
@@ -152,6 +163,21 @@ def build_enriched_list(
             "leadmagic_calls": waterfall_stats.get("leadmagic_calls"),
         },
     }
+    return _attach_model_warning(payload, name)
+
+
+def _attach_model_warning(payload: dict[str, Any], audience: str) -> dict[str, Any]:
+    if audience != "pe_partners":
+        return payload
+    from mobydick.research.life import NO_MODEL_WARNING, llm_keys_present
+
+    if llm_keys_present():
+        payload["life_extraction"] = "llm"
+        return payload
+    payload["life_extraction"] = "heuristic"
+    payload["enrichment_warning"] = NO_MODEL_WARNING
+    logger.warning("%s", NO_MODEL_WARNING)
+    return payload
 
 
 def _count_by(rows: list[dict[str, str]], key: str) -> dict[str, int]:
