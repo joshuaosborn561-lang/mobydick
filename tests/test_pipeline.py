@@ -251,6 +251,8 @@ def test_pe_keeps_paging_until_the_requested_keepers(tmp_path, monkeypatch):
     assert result["shortfall"] == 0
     assert result["scanned"] > 3
     assert result["scan_cap"] == 150
+    assert result["scan_stop"] == "filled"
+    assert result["broadened"] is False
     names = {sample["full_name"] for sample in result["samples"]}
     assert names == {"Ann Keeper", "Bea Keeper", "Cam Keeper"}
     assert "email" not in result["samples"][0]
@@ -323,7 +325,7 @@ def test_story_first_skips_resume_only_rows_and_ranks_personal_facts(tmp_path, m
     assert result["delivered"] == 2
     assert result["shortfall"] == 0
     assert result["dq_reasons"].get("no_personal_story", 0) >= 1
-    assert researched[0] == "Bea Keeper"
+    assert "Bea Keeper" in researched
     assert "Ada Keeper" in researched
     assert [sample["full_name"] for sample in result["samples"]] == ["Bea Keeper", "Dee Keeper"]
     assert "ada.com" not in store.exclude_domains("pe_partners")
@@ -343,3 +345,44 @@ def test_story_first_skips_resume_only_rows_and_ranks_personal_facts(tmp_path, m
     )
     assert short["delivered"] == 0
     assert short["shortfall"] == 1
+    assert short["scan_stop"] == "source_exhausted"
+    assert short["broadened"] is True
+
+
+def test_scan_broadens_when_the_industry_slice_runs_out(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    store = Store(_settings(tmp_path))
+    calls: list[dict[str, object]] = []
+
+    class FakeLeads:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
+            calls.append({"industries": "industries" in filters, "offset": offset})
+            if filters.get("industries"):
+                return [
+                    _pe_row(
+                        "Nope Holdings",
+                        "nope.com",
+                        company_name="Nope Holdings",
+                        company_description="a holdings company",
+                    )
+                ]
+            if offset == 0:
+                return [_pe_row("Ann Keeper", "ann.com")]
+            return []
+
+    monkeypatch.setattr("mobydick.pipeline.pe_scan_cap", lambda wanted, story_first=False: 150)
+    result = build_enriched_list(
+        "pe_partners",
+        1,
+        store=store,
+        getleads=FakeLeads(),
+        fetch_pages=False,
+    )
+    assert result["delivered"] == 1
+    assert result["shortfall"] == 0
+    assert result["broadened"] is True
+    assert result["scan_stop"] == "filled"
+    assert result["scanned"] >= 2
+    assert calls[0]["industries"] is True
+    assert any(call["industries"] is False for call in calls)

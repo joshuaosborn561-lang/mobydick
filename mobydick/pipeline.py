@@ -199,24 +199,51 @@ def _apply_pe_verdict(row: dict[str, str], verdict: dict[str, str]) -> str:
     return verdict.get("dq") or ""
 
 
-def _score_footprints(pending: list[dict[str, str]], limit: int) -> None:
-    """Order the queue. A missing footprint does not remove a candidate."""
+def _apply_footprint(row: dict[str, str]) -> None:
     from mobydick.research.life import public_footprint
 
-    scored = 0
+    try:
+        footprint = public_footprint(row)
+    except Exception:
+        logger.exception("footprint failed")
+        footprint = {"score": 0, "hits": []}
+    row["_footprint_score"] = int(footprint.get("score") or 0)
+    row["_footprint_hits"] = list(footprint.get("hits") or [])[:6]
+
+
+def _score_footprints(pending: list[dict[str, str]], limit: int) -> None:
+    """Order the queue. A missing footprint does not remove a candidate."""
+    todo: list[dict[str, str]] = []
     for row in pending:
         if "_footprint_score" in row:
             continue
-        if scored >= limit:
+        if len(todo) >= limit:
             break
-        try:
-            footprint = public_footprint(row)
-        except Exception:
-            logger.exception("footprint failed")
-            footprint = {"score": 0, "hits": []}
-        row["_footprint_score"] = int(footprint.get("score") or 0)
-        row["_footprint_hits"] = list(footprint.get("hits") or [])[:6]
-        scored += 1
+        todo.append(row)
+    if len(todo) <= 1:
+        for row in todo:
+            _apply_footprint(row)
+        return
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(5, len(todo))) as pool:
+        futures = []
+        for row in todo:
+            ctx = contextvars.copy_context()
+            futures.append(pool.submit(ctx.run, _apply_footprint, row))
+        for future in futures:
+            future.result()
+
+
+def _person_key(row: dict[str, str]) -> str:
+    linkedin = (row.get("linkedin_url") or "").split("?")[0].rstrip("/").lower()
+    if linkedin:
+        return "li:" + linkedin
+    email = (row.get("email") or "").strip().lower()
+    if email:
+        return "em:" + email
+    return "nm:" + (row.get("full_name") or "").strip().lower() + "|" + normalize_domain(row.get("company_domain"))
 
 
 def _apply_story_gate(rows: list[dict[str, str]], *, story_first: bool) -> None:
@@ -259,23 +286,53 @@ def _build_pe_until_full(
     dropped_prior = 0
     pending: list[dict[str, str]] = []
     exhausted = False
+    broadened = False
+    stop_reason = "source_exhausted"
+    active_filters = dict(filters)
+    seen_people: set[str] = set()
     waterfall_parts: list[dict[str, Any]] = []
     with tracing() as trace:
         while len(keepers) < wanted:
             if not pending:
-                if exhausted or len(scanned) >= cap:
+                if len(scanned) >= cap:
+                    stop_reason = "scan_cap"
+                    break
+                if exhausted:
+                    # The industry slice ran out before the cap. Page once without it.
+                    if not broadened and "industries" in active_filters:
+                        active_filters = {
+                            key: value for key, value in active_filters.items() if key != "industries"
+                        }
+                        offset = 0
+                        exhausted = False
+                        broadened = True
+                        continue
+                    stop_reason = "source_exhausted"
                     break
                 limit = min(100, cap - len(scanned))
-                batch = client.search(filters, limit=limit, offset=offset)
+                batch = client.search(active_filters, limit=limit, offset=offset)
                 if not batch:
-                    break
+                    exhausted = True
+                    continue
                 offset += len(batch)
                 scanned.extend(batch)
                 if len(batch) < limit:
                     exhausted = True
                 if progress:
-                    progress({"stage": "pull", "scanned": len(scanned), "scan_cap": cap, "keepers": len(keepers)})
+                    progress(
+                        {
+                            "stage": "pull",
+                            "scanned": len(scanned),
+                            "scan_cap": cap,
+                            "keepers": len(keepers),
+                            "broadened": broadened,
+                        }
+                    )
                 for row in batch:
+                    person = _person_key(row)
+                    if person in seen_people:
+                        continue
+                    seen_people.add(person)
                     domain = normalize_domain(row.get("company_domain"))
                     if domain and domain in excluded:
                         dropped_prior += 1
@@ -349,9 +406,13 @@ def _build_pe_until_full(
         enriched=enriched,
         early_dq=early_dq,
     )
+    if len(keepers) >= wanted:
+        stop_reason = "filled"
     payload["research"] = research
     payload["scanned"] = len(scanned)
     payload["scan_cap"] = cap
+    payload["scan_stop"] = stop_reason
+    payload["broadened"] = broadened
     return _attach_model_warning(payload, "pe_partners")
 
 

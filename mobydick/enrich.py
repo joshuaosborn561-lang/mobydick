@@ -7,7 +7,13 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from mobydick.audiences import PE_PARTNERS, normalize_audience
-from mobydick.pe_fit import assess_pe, firm_self_venture_phrase, last_name_from_text, page_disqualifies_firm
+from mobydick.pe_fit import (
+    assess_pe,
+    firm_self_venture_phrase,
+    firm_text_pe_type,
+    last_name_from_text,
+    page_disqualifies_firm,
+)
 from mobydick.research.extract import extract_person_fields
 from mobydick.research.life import (
     NO_MODEL_WARNING,
@@ -105,14 +111,16 @@ def apply_enrichment(
             pe_dq = "truncated_name"
         venture_phrase = ""
         if fetch_pages and not pe_dq:
-            venture_phrase = firm_self_venture_phrase(
-                row.get("company_name") or "",
-                _identity_text(pages.get("pages") or []),
-            )
+            identity = _identity_text(pages.get("pages") or [])
+            venture_phrase = firm_self_venture_phrase(row.get("company_name") or "", identity)
             if venture_phrase:
                 row["firm_type"] = "venture capital"
                 pe_dq = "not_pe_firm"
                 note_not_pe(row.get("company_name") or "", venture_phrase)
+            elif (row.get("firm_type") or "") == "unknown":
+                claimed = firm_text_pe_type(identity)
+                if claimed:
+                    row["firm_type"] = claimed
         if fetch_pages and not pe_dq:
             if raw.get("_footprint_hits"):
                 row["_footprint_hits"] = raw["_footprint_hits"]
@@ -221,9 +229,31 @@ def enrich_rows(
     fetch_pages: bool = True,
     progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
-    for index, raw in enumerate(raws, start=1):
-        out.append(apply_enrichment(raw, audience, fetch_pages=fetch_pages))
-        if progress:
-            progress({"enriched": index, "total": len(raws)})
+    # Page fetches are the slow part. A few people at a time, still in input order.
+    # Sequential when pages are off so tests that record call order stay stable.
+    if not fetch_pages or len(raws) <= 1:
+        out: list[dict[str, str]] = []
+        for index, raw in enumerate(raws, start=1):
+            out.append(apply_enrichment(raw, audience, fetch_pages=fetch_pages))
+            if progress:
+                progress({"enriched": index, "total": len(raws)})
+        return out
+
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _run(raw: dict[str, str]) -> dict[str, str]:
+        return apply_enrichment(raw, audience, fetch_pages=fetch_pages)
+
+    workers = min(5, len(raws))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = []
+        for raw in raws:
+            ctx = contextvars.copy_context()
+            futures.append(pool.submit(ctx.run, _run, raw))
+        out = []
+        for index, future in enumerate(futures, start=1):
+            out.append(future.result())
+            if progress:
+                progress({"enriched": index, "total": len(raws)})
     return out
