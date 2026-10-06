@@ -71,7 +71,10 @@ def apply_enrichment(
     if pages.get("website") and not row.get("company_website"):
         row["company_website"] = pages["website"]
     if pages.get("mailing_address"):
-        row["mailing_address"] = pages["mailing_address"]
+        if name == LIST_PE or name == PE_PARTNERS:
+            row["firm_mailing_address"] = pages["mailing_address"]
+        else:
+            row["mailing_address"] = pages["mailing_address"]
 
     if name == PE_PARTNERS:
         trace = current()
@@ -128,9 +131,15 @@ def apply_enrichment(
         if trace is not None and before is not None:
             after = trace.as_dict()
             logger.info(
-                "pe person pages_fetched=%s pages_kept=%s searches_run=%s llm_calls=%s facts_extracted=%s facts_rejected=%s reject_reasons=%s",
+                "pe person pages_fetched=%s pages_kept=%s pages_dropped=%s drop_reasons=%s searches_run=%s llm_calls=%s facts_extracted=%s facts_rejected=%s reject_reasons=%s",
                 int(after["pages_fetched"]) - int(before["pages_fetched"]),
                 int(after["pages_kept"]) - int(before["pages_kept"]),
+                int(after["pages_dropped"]) - int(before["pages_dropped"]),
+                {
+                    key: int(after["drop_reasons"].get(key, 0)) - int(before["drop_reasons"].get(key, 0))
+                    for key in set(after["drop_reasons"]) | set(before["drop_reasons"])
+                    if int(after["drop_reasons"].get(key, 0)) - int(before["drop_reasons"].get(key, 0))
+                },
                 int(after["searches_run"]) - int(before["searches_run"]),
                 int(after["llm_calls"]) - int(before["llm_calls"]),
                 int(after["facts_extracted"]) - int(before["facts_extracted"]),

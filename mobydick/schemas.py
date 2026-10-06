@@ -40,7 +40,7 @@ PE_COLUMNS = [
     "company_website",
     "linkedin_url",
     "location",
-    "mailing_address",
+    "firm_mailing_address",
     "hometown_or_from",
     "family_background",
     "college",

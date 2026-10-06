@@ -1,5 +1,6 @@
 from mobydick.enrich import apply_enrichment
 from mobydick.research.life import extract_life_story
+from mobydick.research.web import html_to_text
 
 
 BIO = (
@@ -28,10 +29,12 @@ def test_life_story_cites_concrete_facts_and_stays_empty_without_them():
     assert "Ohio State" in life["college"] or "basketball" in life["college"].lower()
     assert "Navy" in life["military_service"]
     assert life["early_jobs"]
-    assert "church" in life["causes"].lower() or "board" in life["causes"].lower()
+    assert "church" in life["causes"].lower() or "nonprofit" in life["causes"].lower()
     assert "letters by hand" in life["quotes"]
-    assert life["real_story"]
-    assert life["hook"]
+    assert "Dayton" in life["real_story"]
+    assert "dishes" not in life["real_story"]
+    assert "Dayton" in life["hook"]
+    assert "dishes" not in life["hook"]
     assert "example.com/interview" in life["sources"]
     assert life["confidence"] == "high"
 
@@ -109,6 +112,72 @@ def test_apply_enrichment_keeps_cited_life_story(monkeypatch):
     assert row["military_service"]
     assert row["quotes"]
     assert "example.com/interview" in row["sources"]
-    assert row["mailing_address"].startswith("100 Congress")
-    assert "Oak Lane" not in row["mailing_address"]
+    assert row["firm_mailing_address"].startswith("100 Congress")
+    assert "Oak Lane" not in row["firm_mailing_address"]
+    assert "mailing_address" not in row
     assert "home address" not in row["research_note"].lower() or "No home address" in row["research_note"]
+
+
+PERL = (
+    "Doni Perl Principal "
+    "Doni joined Charter Oak Equity in 2017. "
+    "He currently serves on the Board of Directors of CGA Holdings and previously served in a similar capacity for ChemRes. "
+    "Prior to Charter Oak Equity, Doni spent four years at Quadrangle Group, where he focused on investments "
+    "in the communications and media sectors, and two years with Sanabe &amp; Associates, an investment banking boutique. "
+    "He has served on the board of directors of Hargray Holdings and TowerVision Group. "
+    "Doni received a B.S. from the Stern School of Business at New York University, and an MBA from the Yale School of Management. "
+    "He grew up in O&rsquo;Fallon."
+)
+
+
+def test_one_fact_lands_in_one_field_and_entities_are_decoded():
+    assert html_to_text("<p>Sanabe &amp; Associates</p>") == "Sanabe & Associates"
+    assert "rsquo" not in html_to_text("O&rsquo;Fallon")
+    life = extract_life_story(
+        "Doni Perl",
+        [
+            {
+                "url": "https://www.charteroak-equity.com/team/doni-perl",
+                "title": "Team",
+                "kind": "bio",
+                "text": PERL,
+            },
+            {
+                "url": "https://www.youtube.com/watch?v=perl",
+                "title": "Doni Perl interview",
+                "kind": "interview",
+                "text": '"Doni Perl serves on the board of CGA Holdings in this overview of Charter Oak Equity."',
+            },
+        ],
+    )
+    assert "Quadrangle" in life["early_jobs"]
+    assert "Sanabe & Associates" in life["early_jobs"]
+    assert "CGA" not in life["early_jobs"]
+    assert "Hargray" not in life["early_jobs"]
+    assert life["causes"] == ""
+    assert life["quotes"] == ""
+    assert "CGA" not in life["hook"]
+    assert life["hook"]
+    assert "O" in life["hometown"] and "Fallon" in life["hometown"]
+    assert "amp;" not in life["early_jobs"]
+    assert "rsquo" not in life["hometown"]
+    assert "Yale" in life["college"] or "New York" in life["college"]
+    assert life["confidence"] != "high"
+
+
+def test_resume_facts_alone_do_not_make_a_high_confidence_story():
+    life = extract_life_story(
+        "Doni Perl",
+        [
+            {
+                "url": "https://www.charteroak-equity.com/team/doni-perl",
+                "title": "Team",
+                "kind": "bio",
+                "text": PERL.replace(" He grew up in O&rsquo;Fallon.", ""),
+            }
+        ],
+    )
+    assert "Quadrangle" in life["early_jobs"]
+    assert life["hook"] == ""
+    assert life["real_story"] == ""
+    assert life["confidence"] == "low"

@@ -1,5 +1,5 @@
 from mobydick.enrich import apply_enrichment
-from mobydick.pe_fit import assess_pe, classify_firm, person_is_us, title_reason
+from mobydick.pe_fit import assess_pe, classify_firm, page_disqualifies_firm, person_is_us, title_reason
 
 
 def _pe(**overrides):
@@ -132,6 +132,9 @@ def test_email_domain_must_match_the_firm_and_cfo_is_out():
     assert title_reason("Chief Financial Officer/Operating Partner") == "non_deal_role"
     assert classify_firm("Allele Capital", "private equity firm and FINRA Series 7 broker-dealer", "") == "broker-dealer"
     assert classify_firm("Ampersand Holdings", "a diversified holdings company", "") == "unknown"
+    assert classify_firm("Drawdown Fund", "SEC Form D lists the offering as venture", "") == "venture capital"
+    assert page_disqualifies_firm("Form D filing: venture fund") == "venture capital"
+    assert page_disqualifies_firm("She left venture capital to join the private equity firm.") == ""
     fixed = assess_pe(
         _pe(
             full_name="Kerry Wei",

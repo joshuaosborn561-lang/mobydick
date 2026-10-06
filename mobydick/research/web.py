@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html as html_lib
 import re
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -52,6 +53,7 @@ def html_to_text(html: str) -> str:
     cleaned = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
     cleaned = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", cleaned)
     text = re.sub(r"(?is)<[^>]+>", " ", cleaned)
+    text = html_lib.unescape(text)
     return re.sub(r"\s+", " ", text).strip()
 
 
