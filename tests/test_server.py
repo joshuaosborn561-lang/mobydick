@@ -9,6 +9,7 @@ def test_server_exposes_expected_tools():
         "get_job_status",
         "fetch_job_result",
         "exclude_add",
+        "exclude_remove",
         "exclude_check",
         "exclude_count",
         "exclude_import",

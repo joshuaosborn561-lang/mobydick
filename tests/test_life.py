@@ -459,3 +459,172 @@ def test_another_persons_blurb_and_a_charity_board_are_not_the_story():
     assert "charitable" not in shelton["real_story"].lower()
     assert "portfolio" not in shelton["real_story"].lower()
     assert "Houston" in shelton["hook"]
+
+
+def test_third_party_name_matches_need_firm_title_or_city():
+    """Job 053ce268404a: Voyage Austin and a Newmarket obituary were different people."""
+    dj = extract_life_story(
+        "Jason Frank",
+        [
+            {
+                "url": "https://voyageaustin.com/interview/jason-frank-of-all-over-on-life-lessons-legacy-highlight/",
+                "title": "Jason Frank of All Over",
+                "kind": "interview",
+                "text": "I'm partnered up with my wife who also Djs house and techno.",
+            }
+        ],
+        firm="Ardan Equity",
+        domain="ardanequity.com",
+        website="https://ardanequity.com",
+        title="Partner",
+        location="Chicago, Illinois",
+    )
+    assert dj["family_background"] == ""
+    assert dj["real_story"] == ""
+    assert dj["hook"] == ""
+
+    obituary = extract_life_story(
+        "Mark Benham",
+        [
+            {
+                "url": "https://www.legacy.com/us/obituaries/name/mark-benham-obituary?id=62061987",
+                "title": "Mark Benham Obituary",
+                "kind": "bio",
+                "text": (
+                    "Mark Arthur Benham of Newmarket, NH. "
+                    "Born October 1, 1949 in Pittsfield, MA, he was the son of Paul and Ann (Hollenbeck) Benham."
+                ),
+            }
+        ],
+        firm="Celerity Partners",
+        domain="celeritypartners.com",
+        website="https://celeritypartners.com",
+        title="Partner",
+        location="Redwood City, California",
+    )
+    assert "Pittsfield" not in obituary["hometown"]
+    assert "Paul" not in obituary["family_background"]
+    assert obituary["hook"] == ""
+    assert obituary["real_story"] == ""
+
+    local = extract_life_story(
+        "Jason Frank",
+        [
+            {
+                "url": "https://www.chicagotribune.com/jason-frank",
+                "title": "Jason Frank",
+                "kind": "interview",
+                "text": "Jason Frank, a partner at Ardan Equity in Chicago, grew up in Naperville.",
+            }
+        ],
+        firm="Ardan Equity",
+        domain="ardanequity.com",
+        website="https://ardanequity.com",
+        title="Partner",
+        location="Chicago, Illinois",
+    )
+    assert "Naperville" in local["hometown"]
+
+
+def test_field_mapping_keeps_origin_degrees_and_hobbies():
+    pangraze = extract_life_story(
+        "Alex Pangraze",
+        [
+            {
+                "url": "https://legacypinescapital.com/team/alex-pangraze",
+                "title": "Alex Pangraze",
+                "kind": "bio",
+                "text": (
+                    "Alex Pangraze Partner. "
+                    "Originally from Greenville, South Carolina, Alex currently lives in Richmond, Virginia "
+                    "with his wife, Morghan, and their two children, Jack and Grace. "
+                    "Alex's passion for small business goes back to his first job as a sorter on the tomato "
+                    "line of a local family-owned produce business, where he observed the value of loyal "
+                    "employees and a low ego, high impact, roll-up your sleeves leadership style that he "
+                    "strives to embody today."
+                ),
+            }
+        ],
+        firm="Legacy Pines",
+    )
+    assert "Greenville" in pangraze["hometown"]
+    assert pangraze["family_background"] == ""
+    assert "tomato" in pangraze["why"] or "passion" in pangraze["why"].lower()
+    assert "tomato" in pangraze["early_jobs"] or "first job" in pangraze["early_jobs"].lower()
+    assert "passion" in pangraze["real_story"].lower() or "tomato" in pangraze["real_story"].lower()
+
+    stepka = extract_life_story(
+        "Justen Stepka",
+        [
+            {
+                "url": "https://enterprise.fund/team/justen-stepka",
+                "title": "Justen Stepka",
+                "kind": "bio",
+                "text": (
+                    "Justen Stepka Partner. "
+                    "He went on to work there for eight years, Docker for another four, and then launch "
+                    "a private equity firm, Enterprise Fund, along with another Atlassian veteran."
+                ),
+            }
+        ],
+        firm="Enterprise Fund",
+    )
+    assert stepka["military_service"] == ""
+
+    iglehart = extract_life_story(
+        "Joel Iglehart",
+        [
+            {
+                "url": "https://thirdcentury.com/team/joel-iglehart",
+                "title": "Joel Iglehart",
+                "kind": "bio",
+                "text": (
+                    "Mr. Iglehart is originally from Memphis, Tennessee, where he attended Memphis University School. "
+                    "He received a B.A. from the University of Virginia and an M.B.A. from Harvard Business School."
+                ),
+            }
+        ],
+        firm="Third Century",
+    )
+    assert "Memphis" in iglehart["hometown"]
+    assert "Memphis University School" not in iglehart["college"]
+    assert "Virginia" in iglehart["college"] or "Harvard" in iglehart["college"]
+
+    hobbies = extract_life_story(
+        "Will Tucker",
+        [
+            {
+                "url": "https://seratacapital.com/team/will-tucker",
+                "title": "Will Tucker",
+                "kind": "bio",
+                "text": "Will Tucker Partner. Will enjoys golf, basketball, and mentoring local students.",
+            }
+        ],
+        firm="Serata Capital",
+    )
+    assert "golf" in hobbies["life_events"].lower() or "mentor" in hobbies["life_events"].lower()
+    assert "golf" in hobbies["real_story"].lower() or "mentor" in hobbies["real_story"].lower()
+
+
+def test_named_boards_and_founder_exits_are_personal():
+    diaz = extract_life_story(
+        "Jorge Diaz",
+        [
+            {
+                "url": "https://platformllc.com/team/jorge-diaz",
+                "title": "Jorge Diaz",
+                "kind": "bio",
+                "text": (
+                    "Jorge Diaz Partner. "
+                    "Jorge serves on the board of WorkFaith Connection. "
+                    "Jorge founded a payment card business and sold it to Fiserv in 1994. "
+                    "In addition, Jorge enjoys spending time with his wife (Anna), staying physically fit and traveling."
+                ),
+            }
+        ],
+        firm="Platform",
+    )
+    assert "WorkFaith" in diaz["causes"]
+    assert "Fiserv" in diaz["life_events"]
+    assert "WorkFaith" in diaz["real_story"] or "Fiserv" in diaz["real_story"]
+    assert "wife" in diaz["family_background"].lower() or "Anna" in diaz["family_background"]

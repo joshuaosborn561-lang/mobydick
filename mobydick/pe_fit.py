@@ -331,6 +331,12 @@ _RISK = re.compile(
 )
 _VC = re.compile(r"\bventure capital\b", re.IGNORECASE)
 _PE_WORD = re.compile(r"\bprivate equity\b", re.IGNORECASE)
+_REAL_ESTATE = re.compile(
+    r"\b(?:commercial|multifamily)\s+real estate\b|"
+    r"\breal estate (?:firm|fund|investor|investments?|investing|developer)\b|"
+    r"\b(?:speciali[sz]\w+ in|focused on|primarily)\b.{0,100}\breal estate\b",
+    re.IGNORECASE,
+)
 _VC_WORD = re.compile(r"\bventure capital\b", re.IGNORECASE)
 _LINKEDIN_CHROME = re.compile(
     r"\blinkedin\b|skip to main content|\bjoin now\b|\bsign in\b",
@@ -466,7 +472,10 @@ def _unusable_firm_sentence(sentence: str) -> bool:
         return True
     if _LINKEDIN_CHROME.search(text):
         return True
-    if len(_CONFERENCE_WORD.findall(text)) >= 2:
+    if re.search(r"top of page|-->|our companies", text, re.IGNORECASE):
+        return True
+    # One conference mention is an event blurb, not the firm describing itself.
+    if _CONFERENCE_WORD.search(text) and not _SELF_VOICE.search(text):
         return True
     if text.endswith("..."):
         return True
@@ -479,6 +488,17 @@ def _unusable_firm_sentence(sentence: str) -> bool:
 
 def _both_pe_and_venture(sentence: str) -> bool:
     return bool(_PE_WORD.search(sentence or "") and _VC_WORD.search(sentence or ""))
+
+
+def firm_real_estate_phrase(text: str) -> str:
+    """The firm describes itself as a real estate investor. A PE portfolio mention does not."""
+    for sentence in _rough_sentences(text or ""):
+        if _unusable_firm_sentence(sentence) or _NOT_FIRM_SENTENCE.search(sentence):
+            continue
+        if not _REAL_ESTATE.search(sentence):
+            continue
+        return re.sub(r"\s+", " ", sentence).strip()[:180]
+    return ""
 
 
 def firm_text_pe_type(text: str) -> str:
@@ -538,7 +558,12 @@ def firm_self_venture_phrase(name: str, text: str, *, blurb: bool = False) -> st
         named = any(re.search(rf"\b{re.escape(token)}\b", sentence, re.IGNORECASE) for token in tokens)
         if not (blurb or named or _SELF_VOICE.search(sentence)):
             continue
-        return re.sub(r"\s+", " ", sentence).strip()[:180]
+        window_start = max(0, matched.start() - 60)
+        window = sentence[window_start : matched.end() + 80]
+        phrase = re.sub(r"\s+", " ", window).strip()[:180]
+        if not (_VC_IDENTITY.search(phrase) or _VC_FIRM.search(phrase)):
+            continue
+        return phrase
     return ""
 
 
@@ -547,9 +572,7 @@ def _venture_phrase(name: str, description: str, domain: str) -> str:
     host = (domain or "").lower().strip(".")
     if host.endswith(".vc"):
         return ".vc domain"
-    phrase = firm_self_venture_phrase(name, description or "", blurb=True)
-    if phrase:
-        return phrase
+    # GetLeads descriptions and conference snippets are not the firm's homepage.
     return ""
 
 
@@ -563,6 +586,9 @@ def explain_firm(name: str, description: str, industry: str = "", domain: str = 
     broker = _BROKER.search(blob)
     if broker:
         return "broker-dealer", broker.group(0)[:180]
+    estate = firm_real_estate_phrase(description or "")
+    if estate:
+        return "real estate", estate
     for sentence in _rough_sentences(description or ""):
         if _unusable_firm_sentence(sentence):
             continue
@@ -593,9 +619,6 @@ def explain_firm(name: str, description: str, industry: str = "", domain: str = 
     risk = _RISK.search(blob)
     if risk:
         return "risk advisory", risk.group(0)[:180]
-    loose = _VC.search(blob)
-    if loose and firm_self_venture_phrase(name, description or "", blurb=True):
-        return "venture capital", loose.group(0)[:180]
     return "unknown", ""
 
 

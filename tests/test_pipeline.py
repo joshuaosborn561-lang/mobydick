@@ -226,7 +226,12 @@ def test_pe_keeps_paging_until_the_requested_keepers(tmp_path, monkeypatch):
             calls.append(offset)
             if offset == 0:
                 page = [
-                    _pe_row("Bad Ventures", "badventures.com", company_name="Bad Ventures", company_description="a venture fund"),
+                    _pe_row(
+                        "Bad Ventures",
+                        "badventures.com",
+                        company_name="Bad Ventures",
+                        company_description="SEC Form D lists the offering as venture",
+                    ),
                     _pe_row("Cfo Person", "cfo.com", title="Chief Financial Officer/Operating Partner"),
                     _pe_row("Ann Keeper", "ann.com"),
                 ]
@@ -285,7 +290,8 @@ def test_story_first_skips_resume_only_rows_and_ranks_personal_facts(tmp_path, m
                 "Ada Keeper Partner Prior to founding, Ada was the CEO of Liberty Fitness. "
                 "Ada received an MBA from Stanford University."
             )
-        return [{"url": f"https://example.com/{name}", "title": name, "kind": "bio", "text": text}]
+        domain = row.get("company_domain") or "example.com"
+        return [{"url": f"https://{domain}/team", "title": name, "kind": "bio", "text": text}]
 
     def fake_footprint(row: dict[str, str]) -> dict[str, object]:
         score = 9 if row["full_name"] == "Bea Keeper" else 0

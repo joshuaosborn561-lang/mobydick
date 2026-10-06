@@ -55,6 +55,43 @@ def test_same_day_delivery_counts_as_excluded(tmp_path):
     assert counts["persisted"] == 1
 
 
+def test_exclude_remove_overrides_same_day_and_unverified_rows(tmp_path):
+    store = Store(_settings(tmp_path))
+    store.write_delivery(
+        "pe_partners",
+        [
+            {
+                "full_name": "Good Person",
+                "company_name": "Good",
+                "company_domain": "good.com",
+                "person_verified": "yes",
+            },
+            {
+                "full_name": "Bad Person",
+                "company_name": "Ardan Equity",
+                "company_domain": "ardanequity.com",
+                "person_verified": "",
+            },
+        ],
+    )
+    payload = json.loads(store._exclude_path("pe_partners").read_text(encoding="utf-8"))
+    assert payload["domains"] == ["good.com"]
+    # Today's file still lists the unverified domain, so it counts until remove.
+    assert "ardanequity.com" in store.exclude_domains("pe_partners")
+    removed = store.exclude_remove(
+        ["ardanequity.com", "celeritypartners.com", "enterprise.fund"],
+        "pe_partners",
+    )
+    assert removed["removed"] == 3
+    blocked = store.exclude_domains("pe_partners")
+    assert "ardanequity.com" not in blocked
+    assert "celeritypartners.com" not in blocked
+    assert "enterprise.fund" not in blocked
+    assert "good.com" in blocked
+    store.exclude_add(["celeritypartners.com"], "pe_partners")
+    assert "celeritypartners.com" in store.exclude_domains("pe_partners")
+
+
 def test_exclude_import_json_and_csv(tmp_path):
     store = Store(_settings(tmp_path))
     json_path = tmp_path / "prior.json"

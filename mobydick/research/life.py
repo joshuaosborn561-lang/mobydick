@@ -77,6 +77,15 @@ _NOT_A_PERSON = {
     "conferences",
     "school",
     "institute",
+    "business",
+    "management",
+    "arts",
+    "science",
+    "sciences",
+    "law",
+    "medicine",
+    "engineering",
+    "commerce",
     "battalion",
     "principal",
     "partner",
@@ -148,7 +157,15 @@ _COLLEGE = re.compile(
     re.IGNORECASE,
 )
 _MILITARY = re.compile(
-    r"\b(navy|army|marines|marine corps|air force|coast guard|veteran|west point|served in the)\b",
+    r"\b(navy|army|marines|marine corps|air force|coast guard|west point|national guard|served in the)\b",
+    re.IGNORECASE,
+)
+_HIGH_SCHOOL = re.compile(
+    r"\b(?:high school|preparatory school|prep school|university school)\b",
+    re.IGNORECASE,
+)
+_DEGREE = re.compile(
+    r"\b(?:b\.a\.?|b\.s\.?|m\.b\.a\.?|mba|ph\.?d\.?|j\.d\.?|bachelor(?:'s)?|undergraduate)\b",
     re.IGNORECASE,
 )
 _EMPLOYER = re.compile(
@@ -213,6 +230,40 @@ _EVENTS = re.compile(
 )
 _WHY = re.compile(r"\b(private equity|buyout|growth equity)\b", re.IGNORECASE)
 _WHY_PERSONAL = re.compile(r"\b(got into|left|because|started)\b", re.IGNORECASE)
+_WHY_STORY = re.compile(r"\b(?:passion for|goes back to)\b", re.IGNORECASE)
+_HOBBIES = re.compile(r"\b(?:golf|basketball|mentor(?:ing|s|ed)?|mentorship)\b", re.IGNORECASE)
+_FOUNDER_EXIT = re.compile(
+    r"\b(?:co-founded|cofounded|founded|started)\b.{0,160}\b(?:sold|sale to|acquired)\b",
+    re.IGNORECASE,
+)
+_NAMED_CAUSE_BOARD = re.compile(
+    r"\b(?:trustee of|trustees of|on the board of|board of)\s+(?:the\s+)?"
+    r"(?!directors\b|a\b|an\b|several\b|many\b|various\b|multiple\b|numerous\b)"
+    r"([A-Z][\w&'-]+(?:\s+[A-Z][\w&'-]+){0,5})",
+)
+_CORPORATE_ORG = re.compile(
+    r"\b(?:holdings|capital|partners|group|equity|fund|funds|inc|llc|corp|company|companies|"
+    r"technologies|solutions|ventures|advisors|securities)\b",
+    re.IGNORECASE,
+)
+_GENERIC_TITLE_WORDS = {
+    "partner",
+    "principal",
+    "director",
+    "founder",
+    "manager",
+    "president",
+    "managing",
+    "operating",
+    "co",
+    "cofounder",
+    "the",
+    "of",
+    "and",
+    "a",
+    "an",
+}
+_NOT_A_CITY = {"united states", "united states of america", "usa", "america"}
 
 _LIFE_KEYS = (
     "hometown",
@@ -341,7 +392,9 @@ def _is_personal_text(text: str) -> bool:
         return False
     if _is_hometown_sentence(text):
         return True
-    return any(pattern.search(text) for pattern in (_FAMILY, _MILITARY, _ATHLETICS, _EVENTS, _CAUSES))
+    if _named_cause(text) or _is_life_event(text) or _why_counts(text) or _is_military(text):
+        return True
+    return bool(_FAMILY.search(text))
 
 
 _FIRM_NOISE = {
@@ -371,6 +424,111 @@ def _mentions_firm(sentence: str, firm: str) -> bool:
     if not tokens:
         tokens = [token for token in re.findall(r"[A-Za-z0-9&]+", firm or "") if len(token) >= 4]
     return any(re.search(rf"\b{re.escape(token)}\b", sentence or "", re.IGNORECASE) for token in tokens)
+
+
+def _firm_host(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = "https://" + raw.lstrip("/")
+    return host_key(raw)
+
+
+def _host_is_firm(url: str, domain: str, website: str) -> bool:
+    """The firm's own site. An obituary or a city magazine is not."""
+    host = host_key(url)
+    if not host:
+        return False
+    for firm_host in (_firm_host(domain), _firm_host(website)):
+        if not firm_host:
+            continue
+        if host == firm_host or host.endswith("." + firm_host):
+            return True
+    return False
+
+
+def _specific_title(title: str) -> str:
+    text = re.sub(r"\s+", " ", (title or "")).strip()
+    words = re.findall(r"[A-Za-z]+", text)
+    if not words or all(word.lower() in _GENERIC_TITLE_WORDS for word in words):
+        return ""
+    return text
+
+
+def page_has_person_context(
+    text: str,
+    *,
+    firm: str = "",
+    person_title: str = "",
+    location: str = "",
+) -> bool:
+    """A third-party page has to tie the name to this firm, title, PE, or city."""
+    blob = text or ""
+    if firm and _mentions_firm(blob, firm):
+        return True
+    if _WHY.search(blob):
+        return True
+    city = (location or "").split(",")[0].strip()
+    if len(city) >= 4 and city.lower() not in _NOT_A_CITY:
+        if re.search(rf"\b{re.escape(city)}\b", blob, re.IGNORECASE):
+            return True
+    specific = _specific_title(person_title)
+    if specific and re.search(rf"\b{re.escape(specific)}\b", blob, re.IGNORECASE):
+        return True
+    return False
+
+
+def _is_college(sentence: str) -> bool:
+    if not sentence or not _COLLEGE.search(sentence):
+        return False
+    if _HIGH_SCHOOL.search(sentence) and not _DEGREE.search(sentence):
+        return False
+    return True
+
+
+def _is_military(sentence: str) -> bool:
+    """Armed service. A career 'veteran' of a company is not military service."""
+    if not sentence or not _MILITARY.search(sentence):
+        return False
+    if _is_employer(sentence) and not re.search(r"\b(?:served|enlisted|commissioned)\b", sentence, re.IGNORECASE):
+        return False
+    return True
+
+
+def _named_cause(sentence: str) -> bool:
+    """A named nonprofit board counts. An unnamed charity list or a portfolio board does not."""
+    if not sentence or _resume_board(sentence):
+        return False
+    if re.search(r"\bportfolio compan", sentence, re.IGNORECASE):
+        return False
+    if re.search(r"\bboard of directors\b", sentence, re.IGNORECASE):
+        return False
+    if _CAUSES.search(sentence):
+        return True
+    match = _NAMED_CAUSE_BOARD.search(sentence)
+    if not match or _CORPORATE_ORG.search(match.group(1)):
+        return False
+    return True
+
+
+def _is_life_event(sentence: str) -> bool:
+    if not sentence or _only_age_or_birth(sentence):
+        return False
+    return bool(
+        _EVENTS.search(sentence)
+        or _ATHLETICS.search(sentence)
+        or _HOBBIES.search(sentence)
+        or _FOUNDER_EXIT.search(sentence)
+    )
+
+
+def _why_counts(sentence: str) -> bool:
+    if not sentence:
+        return False
+    if _WHY_STORY.search(sentence):
+        return True
+    return bool(_WHY.search(sentence) and (_FIRST_PERSON.search(sentence) or _WHY_PERSONAL.search(sentence)))
 
 
 def _is_employer(sentence: str, firm: str = "") -> bool:
@@ -647,12 +805,50 @@ def _blank() -> dict[str, str]:
     return fields
 
 
-def _usable_passages(full_name: str, sources: list[dict[str, str]]) -> list[dict[str, str]]:
+def _third_party_blocked(
+    source: dict[str, str],
+    *,
+    firm: str = "",
+    domain: str = "",
+    website: str = "",
+    person_title: str = "",
+    location: str = "",
+) -> bool:
+    """Name-only matches on obituaries and local interviews are a different person."""
+    if not (domain or website):
+        return False
+    url = source.get("url") or ""
+    if _host_is_firm(url, domain, website):
+        return False
+    blob = f"{source.get('title') or ''}\n{source.get('text') or source.get('transcript') or source.get('description') or ''}"
+    return not page_has_person_context(blob, firm=firm, person_title=person_title, location=location)
+
+
+def _usable_passages(
+    full_name: str,
+    sources: list[dict[str, str]],
+    *,
+    firm: str = "",
+    domain: str = "",
+    website: str = "",
+    person_title: str = "",
+    location: str = "",
+) -> list[dict[str, str]]:
     first, last = _split_name(full_name)
     passages: list[dict[str, str]] = []
     for source in sources:
         if is_people_search(source.get("url") or ""):
             reject("people_search")
+            continue
+        if _third_party_blocked(
+            source,
+            firm=firm,
+            domain=domain,
+            website=website,
+            person_title=person_title,
+            location=location,
+        ):
+            reject("wrong_person")
             continue
         text = passage_for_source(source, first, last)
         if not text:
@@ -701,19 +897,19 @@ def _heuristic_from_passages(
             slots: list[tuple[str, str]] = []
             if _is_hometown_sentence(sentence):
                 slots.append(("hometown", clipped))
-            if _FAMILY.search(sentence):
+            if _FAMILY.search(sentence) and not _is_hometown_sentence(sentence):
                 slots.append(("family_background", clipped))
-            if _COLLEGE.search(sentence):
+            if _is_college(sentence):
                 slots.append(("college", clipped))
-            if _MILITARY.search(sentence):
+            if _is_military(sentence):
                 slots.append(("military_service", clipped))
             if _is_employer(sentence, firm):
                 slots.append(("early_jobs", clipped))
-            if _CAUSES.search(sentence) and not _resume_board(sentence):
+            if _named_cause(sentence):
                 slots.append(("causes", clipped))
-            if (_EVENTS.search(sentence) or _ATHLETICS.search(sentence)) and not _only_age_or_birth(sentence):
+            if _is_life_event(sentence):
                 slots.append(("life_events", clipped))
-            if _WHY.search(sentence) and (_FIRST_PERSON.search(sentence) or _WHY_PERSONAL.search(sentence)):
+            if _why_counts(sentence):
                 slots.append(("why", clipped))
             spoken = _spoken_quote(sentence) if _quote_ok(source) else ""
             if spoken and _sentence_about(spoken, first, last, passage_is_theirs):
@@ -767,19 +963,19 @@ def _fits_field(key: str, text: str, firm: str = "") -> bool:
     if key == "early_jobs":
         return _is_employer(text, firm)
     if key == "causes":
-        return bool(_CAUSES.search(text) and not _resume_board(text))
+        return _named_cause(text)
     if key == "hometown":
         return _is_hometown_sentence(text)
     if key == "college":
-        return bool(_COLLEGE.search(text))
+        return _is_college(text)
     if key == "military_service":
-        return bool(_MILITARY.search(text))
+        return _is_military(text)
     if key == "family_background":
-        return bool(_FAMILY.search(text))
+        return bool(_FAMILY.search(text) and not _is_hometown_sentence(text))
     if key == "life_events":
-        return bool((_EVENTS.search(text) or _ATHLETICS.search(text)) and not _only_age_or_birth(text))
+        return _is_life_event(text)
     if key == "why":
-        return bool(_WHY.search(text))
+        return _why_counts(text)
     return False
 
 
@@ -799,6 +995,12 @@ def _llm_fill(full_name: str, firm: str, passages: list[dict[str, str]], found: 
         "Put each fact in exactly one field. early_jobs means prior employers and roles, not a board seat.\n"
         "causes means a nonprofit, charity, faith, or philanthropy, not a portfolio company board.\n"
         "An unnamed charity board or a board seat at portfolio companies is not a cause.\n"
+        "A named nonprofit board is a cause. Founding a business and selling it is a life event.\n"
+        "High school, prep school, and a university school are not college. A bachelor's, master's, or MBA is college.\n"
+        "A career sentence is not military service. A company veteran is not a veteran of the armed forces.\n"
+        "Do not put a hometown sentence in family_background.\n"
+        "A passion that goes back to a first job belongs in why.\n"
+        "Golf, basketball, and mentoring belong in life_events.\n"
         "quotes must be first-person words the person said. Do not quote a third-person description.\n"
         "Do not quote a blurb, review, or endorsement of someone else.\n"
         "An age or a birth year alone is not a hometown and not a life event.\n"
@@ -863,6 +1065,9 @@ def _personal_values(found: dict[str, str]) -> list[str]:
         value = found.get(key) or ""
         if value and _is_personal_text(value) and value not in personal:
             personal.append(value)
+    why = found.get("why") or ""
+    if why and _why_counts(why) and why not in personal:
+        personal.append(why)
     quote = found.get("quotes") or ""
     if quote and quote not in personal:
         personal.append(quote)
@@ -879,6 +1084,7 @@ def cited_personal_facts(row: dict[str, str]) -> list[str]:
         "causes": row.get("beliefs_or_causes") or row.get("causes") or "",
         "college": row.get("college") or "",
         "early_jobs": row.get("early_jobs") or "",
+        "why": row.get("why_got_into_pe") or row.get("why") or "",
         "quotes": row.get("quotes") or "",
     }
     return _personal_values(found)
@@ -889,9 +1095,21 @@ def extract_life_story(
     sources: list[dict[str, str]],
     *,
     firm: str = "",
+    domain: str = "",
+    website: str = "",
+    title: str = "",
+    location: str = "",
 ) -> dict[str, str]:
     """Copy sentences from the named person's own passage. Never paraphrase."""
-    passages = _usable_passages(full_name, sources)
+    passages = _usable_passages(
+        full_name,
+        sources,
+        firm=firm,
+        domain=domain,
+        website=website,
+        person_title=title,
+        location=location,
+    )
     found, cites = _heuristic_from_passages(full_name, passages, firm=firm)
     _llm_fill(full_name, firm, passages, found, cites)
     _reroute_personal(found, cites)
@@ -1038,11 +1256,23 @@ def gather_person_sources(row: dict[str, str]) -> list[dict[str, str]]:
     first = row.get("first_name") or _split_name(full)[0]
     firm = row.get("company_name") or ""
     domain = row.get("company_domain") or ""
+    person_title = row.get("title") or ""
+    location = row.get("location") or ""
     base = company_url(row.get("company_website") or "", domain)
 
     def store(url: str, title: str, text: str, kind: str) -> None:
         if is_people_search(url):
             drop_page("people_search")
+            return
+        if (domain or base) and _third_party_blocked(
+            {"url": url, "title": title, "text": text, "kind": kind},
+            firm=firm,
+            domain=domain,
+            website=base,
+            person_title=person_title,
+            location=location,
+        ):
+            drop_page("wrong_person")
             return
         passage = passage_for_source(
             {"url": url, "title": title, "text": text, "kind": kind},
