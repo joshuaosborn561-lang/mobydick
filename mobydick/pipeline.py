@@ -12,6 +12,7 @@ from mobydick.audiences import (
     default_filters,
     normalize_audience,
     overfetch_count,
+    pe_scan_cap,
 )
 from mobydick.domains import normalize_domain
 from mobydick.enrich import enrich_rows
@@ -89,6 +90,18 @@ def build_enriched_list(
     if progress:
         progress({"stage": "pull", "requested": wanted, "overfetch": pull_n, "excluded": len(excluded)})
 
+    if name == "pe_partners" and raw_rows is None:
+        client = getleads or GetLeadsClient()
+        return _build_pe_until_full(
+            wanted=wanted,
+            store=store,
+            excluded=excluded,
+            filters=merged_filters,
+            client=client,
+            fetch_pages=fetch_pages and enrich,
+            progress=progress,
+        )
+
     if raw_rows is None:
         client = getleads or GetLeadsClient()
         raw_rows = client.pull(
@@ -128,21 +141,175 @@ def build_enriched_list(
         progress({"stage": "dedupe", "unique": len(unique), "fresh": len(fresh), "dropped_prior": dropped_prior})
 
     waterfall_stats = fill_missing_emails(fresh, progress=progress)
-    enriched = enrich_rows(fresh, name, fetch_pages=fetch_pages and enrich, progress=progress)
+    research = None
+    if name == "pe_partners":
+        from mobydick.research.trace import tracing
+
+        with tracing() as trace:
+            enriched = enrich_rows(fresh, name, fetch_pages=fetch_pages and enrich, progress=progress)
+            research = trace.as_dict()
+        logger.info("pe research %s", research)
+    else:
+        enriched = enrich_rows(fresh, name, fetch_pages=fetch_pages and enrich, progress=progress)
+    payload = _delivery_payload(
+        name=name,
+        wanted=wanted,
+        store=store,
+        raw_count=len(raw_rows),
+        unique_count=len(unique),
+        dropped_prior=dropped_prior,
+        excluded_count=len(excluded),
+        waterfall_stats=waterfall_stats,
+        enriched=enriched,
+        early_dq=early_dq,
+    )
+    if research is not None:
+        payload["research"] = research
+    return _attach_model_warning(payload, name)
+
+
+def _apply_pe_verdict(row: dict[str, str], verdict: dict[str, str]) -> str:
+    if verdict.get("company_domain"):
+        row["company_domain"] = verdict["company_domain"]
+    if verdict.get("full_name"):
+        row["full_name"] = verdict["full_name"]
+    if verdict.get("first_name"):
+        row["first_name"] = verdict["first_name"]
+    if verdict.get("last_name"):
+        row["last_name"] = verdict["last_name"]
+    return verdict.get("dq") or ""
+
+
+def _build_pe_until_full(
+    *,
+    wanted: int,
+    store: Store,
+    excluded: set[str],
+    filters: dict[str, Any],
+    client: GetLeadsClient,
+    fetch_pages: bool,
+    progress: Callable[[dict[str, Any]], None] | None,
+) -> dict[str, Any]:
+    """Page GetLeads until enough PE keepers pass, or the scan cap is hit."""
+    from mobydick.pe_fit import assess_pe
+    from mobydick.research.trace import tracing
+
+    cap = pe_scan_cap(wanted)
+    scanned: list[dict[str, str]] = []
+    enriched: list[dict[str, str]] = []
+    keepers: list[dict[str, str]] = []
+    early_dq: list[dict[str, str]] = []
+    kept_domains: set[str] = set()
+    offset = 0
+    dropped_prior = 0
+    pending: list[dict[str, str]] = []
+    exhausted = False
+    waterfall_parts: list[dict[str, Any]] = []
+    with tracing() as trace:
+        while len(keepers) < wanted:
+            if not pending:
+                if exhausted or len(scanned) >= cap:
+                    break
+                limit = min(100, cap - len(scanned))
+                batch = client.search(filters, limit=limit, offset=offset)
+                if not batch:
+                    break
+                offset += len(batch)
+                scanned.extend(batch)
+                if len(batch) < limit:
+                    exhausted = True
+                if progress:
+                    progress({"stage": "pull", "scanned": len(scanned), "scan_cap": cap, "keepers": len(keepers)})
+                for row in batch:
+                    domain = normalize_domain(row.get("company_domain"))
+                    if domain and domain in excluded:
+                        dropped_prior += 1
+                        continue
+                    if domain and domain in kept_domains:
+                        continue
+                    verdict = assess_pe(row)
+                    reason = _apply_pe_verdict(row, verdict)
+                    if reason:
+                        early_dq.append({"dq": reason, "firm_type": verdict.get("firm_type") or ""})
+                        continue
+                    if domain:
+                        kept_domains.add(domain)
+                    pending.append(row)
+                if not pending:
+                    continue
+            fresh = pending[: wanted - len(keepers)]
+            pending = pending[len(fresh) :]
+            waterfall_parts.append(fill_missing_emails(fresh, progress=progress))
+            batch_enriched = enrich_rows(fresh, "pe_partners", fetch_pages=fetch_pages, progress=progress)
+            enriched.extend(batch_enriched)
+            for row in batch_enriched:
+                if row.get("dq"):
+                    if row.get("company_domain"):
+                        kept_domains.discard(normalize_domain(row["company_domain"]))
+                    continue
+                keepers.append(row)
+        research = trace.as_dict()
+    logger.info("pe research %s", research)
+    unique_domains = {
+        domain
+        for domain in (normalize_domain(row.get("company_domain")) for row in scanned)
+        if domain
+    }
+    payload = _delivery_payload(
+        name="pe_partners",
+        wanted=wanted,
+        store=store,
+        raw_count=len(scanned),
+        unique_count=len(unique_domains),
+        dropped_prior=dropped_prior,
+        excluded_count=len(excluded),
+        waterfall_stats=_merge_waterfall(waterfall_parts),
+        enriched=enriched,
+        early_dq=early_dq,
+    )
+    payload["research"] = research
+    payload["scanned"] = len(scanned)
+    payload["scan_cap"] = cap
+    return _attach_model_warning(payload, "pe_partners")
+
+
+def _merge_waterfall(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    if not parts:
+        return {"missing_before": 0, "filled": 0, "still_missing": 0, "leadmagic_calls": 0}
+    return {
+        "missing_before": sum(int(part.get("missing_before") or 0) for part in parts),
+        "filled": sum(int(part.get("filled") or 0) for part in parts),
+        "still_missing": sum(int(part.get("still_missing") or 0) for part in parts),
+        "leadmagic_calls": sum(int(part.get("leadmagic_calls") or 0) for part in parts),
+    }
+
+
+def _delivery_payload(
+    *,
+    name: str,
+    wanted: int,
+    store: Store,
+    raw_count: int,
+    unique_count: int,
+    dropped_prior: int,
+    excluded_count: int,
+    waterfall_stats: dict[str, Any],
+    enriched: list[dict[str, str]],
+    early_dq: list[dict[str, str]],
+) -> dict[str, Any]:
     keepers = [row for row in enriched if not row.get("dq")]
     dq_rows = early_dq + [row for row in enriched if row.get("dq")]
     delivered = keepers[:wanted]
     path = store.write_delivery(name, delivered)
-
     samples = [compact_sample(row) for row in delivered[:10]]
-    payload = {
+    return {
         "ok": True,
         "audience": name,
         "requested": wanted,
-        "pulled_raw": len(raw_rows),
-        "unique_companies": len(unique),
+        "pulled_raw": raw_count,
+        "unique_companies": unique_count,
         "dropped_prior_domains": dropped_prior,
-        "excluded_list_size": len(excluded),
+        "excluded_list_size": excluded_count,
         "emails_filled": waterfall_stats.get("filled"),
         "emails_still_missing": waterfall_stats.get("still_missing"),
         "enriched": len(enriched),
@@ -163,7 +330,6 @@ def build_enriched_list(
             "leadmagic_calls": waterfall_stats.get("leadmagic_calls"),
         },
     }
-    return _attach_model_warning(payload, name)
 
 
 def _attach_model_warning(payload: dict[str, Any], audience: str) -> dict[str, Any]:

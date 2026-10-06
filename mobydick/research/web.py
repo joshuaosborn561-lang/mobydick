@@ -48,9 +48,25 @@ def company_url(website: str, domain: str) -> str:
     return f"https://{domain}"
 
 
-def fetch_text(url: str, *, http: requests.Session | None = None, timeout: int = 15) -> str:
+def html_to_text(html: str) -> str:
+    cleaned = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
+    cleaned = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", cleaned)
+    text = re.sub(r"(?is)<[^>]+>", " ", cleaned)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def fetch_document(
+    url: str,
+    *,
+    http: requests.Session | None = None,
+    timeout: int = 15,
+) -> tuple[str, str]:
+    """Return (html, visible text). Counts the attempt. Empty when the fetch fails."""
+    from mobydick.research.trace import note
+
     if not url:
-        return ""
+        return "", ""
+    note("pages_fetched")
     session = http or requests.Session()
     try:
         resp = session.get(
@@ -60,15 +76,75 @@ def fetch_text(url: str, *, http: requests.Session | None = None, timeout: int =
             allow_redirects=True,
         )
     except requests.RequestException:
-        return ""
+        return "", ""
     if resp.status_code >= 400:
-        return ""
+        return "", ""
     html = resp.text or ""
-    html = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html)
-    html = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", html)
-    text = re.sub(r"(?is)<[^>]+>", " ", html)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    text = html_to_text(html)
+    if text:
+        note("pages_with_text")
+    return html, text
+
+
+def fetch_text(url: str, *, http: requests.Session | None = None, timeout: int = 15) -> str:
+    return fetch_document(url, http=http, timeout=timeout)[1]
+
+
+def host_key(url: str) -> str:
+    host = urlparse(url or "").netloc.lower().split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def same_site(url: str, base: str) -> bool:
+    left = host_key(url)
+    right = host_key(base)
+    return bool(left and right and left == right)
+
+
+_ANCHOR = re.compile(r"(?is)<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>")
+_TEAMISH = re.compile(
+    r"team|people|leadership|leaders|professionals|our-team|biography|bio\b",
+    re.IGNORECASE,
+)
+_SKIP_FILE = re.compile(r"\.(?:pdf|jpe?g|png|gif|zip|css|js|svg|webp)$", re.IGNORECASE)
+
+
+def page_links(html: str, base: str) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    for href, inner in _ANCHOR.findall(html or ""):
+        href = href.strip()
+        if not href or href.startswith(("#", "mailto:", "javascript:", "tel:")):
+            continue
+        url = urljoin(base if base.endswith("/") else base + "/", href)
+        parsed = urlparse(url)
+        if _SKIP_FILE.search(parsed.path or ""):
+            continue
+        clean = parsed._replace(query="", fragment="").geturl()
+        text = re.sub(r"\s+", " ", re.sub(r"(?is)<[^>]+>", " ", inner)).strip()
+        found.append((clean, text))
+    return found
+
+
+def candidate_bio_urls(html: str, base: str, first: str, last: str) -> list[str]:
+    """Same-site links that name the person, then links that look like a team page."""
+    named: list[str] = []
+    team: list[str] = []
+    seen: set[str] = set()
+    last_re = re.compile(rf"\b{re.escape(last)}\b", re.IGNORECASE) if last else None
+    first_re = re.compile(rf"\b{re.escape(first)}\b", re.IGNORECASE) if first else None
+    for url, text in page_links(html, base):
+        if url in seen or not same_site(url, base):
+            continue
+        blob = f"{url} {text}"
+        if last_re and last_re.search(blob) and (not first_re or first_re.search(blob)):
+            named.append(url)
+            seen.add(url)
+        elif _TEAMISH.search(blob):
+            team.append(url)
+            seen.add(url)
+    return named + team
 
 
 def extract_office_address(text: str) -> str:

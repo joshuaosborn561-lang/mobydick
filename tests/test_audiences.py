@@ -1,6 +1,6 @@
 import pytest
 
-from mobydick.audiences import default_filters, getleads_search_args, normalize_audience, overfetch_count
+from mobydick.audiences import default_filters, getleads_search_args, normalize_audience, overfetch_count, pe_scan_cap
 
 
 def test_normalize_audience():
@@ -15,6 +15,12 @@ def test_overfetch_clamped():
     assert overfetch_count(100, 2.0) == 200
     assert overfetch_count(100, 9.0) == 300
     assert overfetch_count(100, 0.1) == 150
+
+
+def test_pe_scan_cap_is_wider_than_a_2x_pull():
+    assert pe_scan_cap(10) == 80
+    assert pe_scan_cap(1) == 40
+    assert pe_scan_cap(500) == 2000
 
 
 def test_series_ab_filters_drop_helper_keys():

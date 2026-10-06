@@ -191,3 +191,67 @@ def test_pe_pipeline_drops_wrong_country_title_and_firm(tmp_path, monkeypatch):
     assert result["life_extraction"] == "heuristic"
     assert "ANTHROPIC_API_KEY" in result["enrichment_warning"]
     assert "OPENAI_API_KEY" in result["enrichment_warning"]
+    assert result["research"]["llm_calls"] == 0
+    assert result["research"]["facts_extracted"] == 0
+
+
+def _pe_row(name: str, domain: str, **overrides: str) -> dict[str, str]:
+    first, last = name.split(" ", 1)
+    row = {
+        "full_name": name,
+        "first_name": first,
+        "last_name": last,
+        "title": "Managing Partner",
+        "email": f"{first.lower()}@{domain}",
+        "company_name": "Northline",
+        "company_domain": domain,
+        "company_website": f"https://{domain}",
+        "company_description": "lower-middle-market private equity firm",
+        "contact_country": "United States",
+        "company_hq_country": "United States",
+        "location": "Austin, Texas",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_pe_keeps_paging_until_the_requested_keepers(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    store = Store(_settings(tmp_path))
+    calls: list[int] = []
+
+    class FakeLeads:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
+            calls.append(offset)
+            if offset == 0:
+                page = [
+                    _pe_row("Bad Ventures", "badventures.com", company_name="Bad Ventures", company_description="a venture fund"),
+                    _pe_row("Cfo Person", "cfo.com", title="Chief Financial Officer/Operating Partner"),
+                    _pe_row("Ann Keeper", "ann.com"),
+                ]
+                page.extend(
+                    _pe_row(f"Extra {index}", f"extra{index}.com", company_name="Nope Holdings", company_description="a holdings company")
+                    for index in range(limit - 3)
+                )
+                return page
+            return [_pe_row("Bea Keeper", "bea.com"), _pe_row("Cam Keeper", "cam.com")]
+
+    monkeypatch.setattr("mobydick.pipeline.pe_scan_cap", lambda wanted: 150)
+    result = build_enriched_list(
+        "pe_partners",
+        3,
+        store=store,
+        getleads=FakeLeads(),
+        fetch_pages=False,
+    )
+    assert calls[0] == 0
+    assert calls[1] > 0
+    assert result["delivered"] == 3
+    assert result["shortfall"] == 0
+    assert result["scanned"] > 3
+    assert result["scan_cap"] == 150
+    names = {sample["full_name"] for sample in result["samples"]}
+    assert names == {"Ann Keeper", "Bea Keeper", "Cam Keeper"}
+    assert "email" not in result["samples"][0]
+    assert result["research"]["pages_fetched"] == 0

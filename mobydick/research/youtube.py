@@ -19,6 +19,9 @@ def search_videos(
     cfg = settings or default_settings
     if not cfg.youtube_api_key or not query.strip():
         return []
+    from mobydick.research.trace import note
+
+    note("searches_run")
     session = http or requests.Session()
     try:
         resp = session.get(
