@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from mobydick.audiences import PE_PARTNERS, normalize_audience
 from mobydick.pe_fit import (
     assess_pe,
+    firm_real_estate_phrase,
     firm_self_venture_phrase,
     firm_text_pe_type,
     last_name_from_text,
@@ -21,7 +22,7 @@ from mobydick.research.life import (
     gather_person_sources,
     llm_keys_present,
 )
-from mobydick.research.trace import current, drop_person, note_not_pe
+from mobydick.research.trace import current, drop_person, isolated, note_not_pe
 from mobydick.research.web import gather_company_pages
 from mobydick.schemas import empty_row
 from mobydick.store import LIST_PE
@@ -45,6 +46,104 @@ def _identity_text(pages: list[dict[str, Any]]) -> str:
         if path in _IDENTITY_PATHS:
             chunks.append(str(page.get("text") or ""))
     return "\n".join(chunks)[:8000]
+
+
+def _enrich_pe_person(
+    row: dict[str, str],
+    raw: dict[str, str],
+    screened: dict[str, str],
+    pages: dict[str, Any],
+    *,
+    fetch_pages: bool,
+    pe_dq: str,
+) -> None:
+    """Research one PE person on a private counter, then the caller folds it into the job."""
+    life_sources: list[dict[str, str]] = []
+    if screened.get("unresolved_name") and not pe_dq and not fetch_pages:
+        pe_dq = "truncated_name"
+    if fetch_pages and not pe_dq:
+        identity = _identity_text(pages.get("pages") or [])
+        estate_phrase = firm_real_estate_phrase(identity)
+        venture_phrase = "" if estate_phrase else firm_self_venture_phrase(row.get("company_name") or "", identity)
+        if estate_phrase:
+            row["firm_type"] = "real estate"
+            pe_dq = "not_pe_firm"
+            note_not_pe(row.get("company_name") or "", estate_phrase)
+        elif venture_phrase:
+            row["firm_type"] = "venture capital"
+            pe_dq = "not_pe_firm"
+            note_not_pe(row.get("company_name") or "", venture_phrase)
+        elif (row.get("firm_type") or "") == "unknown":
+            claimed = firm_text_pe_type(identity)
+            if claimed:
+                row["firm_type"] = claimed
+    if fetch_pages and not pe_dq:
+        if raw.get("_footprint_hits"):
+            row["_footprint_hits"] = raw["_footprint_hits"]
+        if "_footprint_score" in raw:
+            row["_footprint_score"] = raw["_footprint_score"]
+        life_sources = gather_person_sources(row)
+        row.pop("_footprint_hits", None)
+        row.pop("_footprint_score", None)
+        if screened.get("unresolved_name"):
+            resolved = last_name_from_text(
+                row.get("first_name") or "",
+                " ".join(source.get("text") or "" for source in life_sources),
+            )
+            if resolved:
+                row["last_name"] = resolved
+                row["full_name"] = f"{row.get('first_name') or ''} {resolved}".strip()
+            else:
+                pe_dq = "truncated_name"
+                life_sources = []
+    if pe_dq:
+        life_sources = []
+    elif life_sources:
+        page_text = " ".join(source.get("text") or "" for source in life_sources)[:6000]
+        revised = page_disqualifies_firm(f"{raw.get('company_description') or ''} {page_text}")
+        if revised:
+            row["firm_type"] = revised
+            pe_dq = "not_pe_firm"
+            life_sources = []
+    life = extract_life_story(
+        row.get("full_name") or "",
+        life_sources,
+        firm=row.get("company_name") or "",
+        domain=row.get("company_domain") or "",
+        website=row.get("company_website") or "",
+        title=row.get("title") or "",
+        location=row.get("location") or raw.get("location") or "",
+    )
+    if pe_dq:
+        life = {key: "" for key in life}
+        life["confidence"] = "low"
+        life["research_note"] = life.get("research_note") or (
+            f"Public sources only. Empty means not found. No home address. {NO_MODEL_WARNING}"
+            if not llm_keys_present()
+            else "Public sources only. Empty means not found. No home address."
+        )
+    row["hometown_or_from"] = life.get("hometown") or ""
+    row["family_background"] = life.get("family_background") or ""
+    row["college"] = life.get("college") or ""
+    row["military_service"] = life.get("military_service") or ""
+    row["early_jobs"] = life.get("early_jobs") or ""
+    row["why_got_into_pe"] = life.get("why") or ""
+    row["beliefs_or_causes"] = life.get("causes") or ""
+    row["life_events"] = life.get("life_events") or ""
+    row["quotes"] = life.get("quotes") or ""
+    row["real_story"] = life.get("real_story") or ""
+    row["best_emotional_hook"] = life.get("hook") or ""
+    row["research_note"] = life.get("research_note") or ""
+    row["sources"] = life.get("sources") or ""
+    row["confidence"] = life.get("confidence") or "low"
+    row["dq"] = pe_dq
+    row["person_verified"] = "yes" if not pe_dq else ""
+    if pe_dq:
+        drop_person(pe_dq)
+    elif fetch_pages:
+        trace = current()
+        if trace is not None and int(trace.as_dict()["pages_kept"]) <= 0:
+            row["_no_pages_kept"] = "1"
 
 
 def disqualify(row: dict[str, str], audience: str) -> str:
@@ -104,102 +203,27 @@ def apply_enrichment(
             row["mailing_address"] = pages["mailing_address"]
 
     if name == PE_PARTNERS:
-        trace = current()
-        before = trace.as_dict() if trace is not None else None
-        life_sources: list[dict[str, str]] = []
-        if screened.get("unresolved_name") and not pe_dq and not fetch_pages:
-            pe_dq = "truncated_name"
-        venture_phrase = ""
-        if fetch_pages and not pe_dq:
-            identity = _identity_text(pages.get("pages") or [])
-            venture_phrase = firm_self_venture_phrase(row.get("company_name") or "", identity)
-            if venture_phrase:
-                row["firm_type"] = "venture capital"
-                pe_dq = "not_pe_firm"
-                note_not_pe(row.get("company_name") or "", venture_phrase)
-            elif (row.get("firm_type") or "") == "unknown":
-                claimed = firm_text_pe_type(identity)
-                if claimed:
-                    row["firm_type"] = claimed
-        if fetch_pages and not pe_dq:
-            if raw.get("_footprint_hits"):
-                row["_footprint_hits"] = raw["_footprint_hits"]
-            if "_footprint_score" in raw:
-                row["_footprint_score"] = raw["_footprint_score"]
-            life_sources = gather_person_sources(row)
-            row.pop("_footprint_hits", None)
-            row.pop("_footprint_score", None)
-            if screened.get("unresolved_name"):
-                resolved = last_name_from_text(
-                    row.get("first_name") or "",
-                    " ".join(source.get("text") or "" for source in life_sources),
-                )
-                if resolved:
-                    row["last_name"] = resolved
-                    row["full_name"] = f"{row.get('first_name') or ''} {resolved}".strip()
-                else:
-                    pe_dq = "truncated_name"
-                    life_sources = []
-        if pe_dq:
-            life_sources = []
-        elif life_sources:
-            page_text = " ".join(source.get("text") or "" for source in life_sources)[:6000]
-            revised = page_disqualifies_firm(f"{raw.get('company_description') or ''} {page_text}")
-            if revised:
-                row["firm_type"] = revised
-                pe_dq = "not_pe_firm"
-                life_sources = []
-        life = extract_life_story(row.get("full_name") or "", life_sources, firm=row.get("company_name") or "")
-        if pe_dq:
-            life = {key: "" for key in life}
-            life["confidence"] = "low"
-            life["research_note"] = life.get("research_note") or (
-                f"Public sources only. Empty means not found. No home address. {NO_MODEL_WARNING}"
-                if not llm_keys_present()
-                else "Public sources only. Empty means not found. No home address."
+        with isolated() as person_trace:
+            _enrich_pe_person(
+                row,
+                raw,
+                screened,
+                pages,
+                fetch_pages=fetch_pages,
+                pe_dq=pe_dq,
             )
-        row["hometown_or_from"] = life.get("hometown") or ""
-        row["family_background"] = life.get("family_background") or ""
-        row["college"] = life.get("college") or ""
-        row["military_service"] = life.get("military_service") or ""
-        row["early_jobs"] = life.get("early_jobs") or ""
-        row["why_got_into_pe"] = life.get("why") or ""
-        row["beliefs_or_causes"] = life.get("causes") or ""
-        row["life_events"] = life.get("life_events") or ""
-        row["quotes"] = life.get("quotes") or ""
-        row["real_story"] = life.get("real_story") or ""
-        row["best_emotional_hook"] = life.get("hook") or ""
-        row["research_note"] = life.get("research_note") or ""
-        row["sources"] = life.get("sources") or ""
-        row["confidence"] = life.get("confidence") or "low"
-        row["dq"] = pe_dq
-        if pe_dq:
-            drop_person(pe_dq)
-        elif fetch_pages and before is not None and trace is not None:
-            kept_now = int(trace.as_dict()["pages_kept"]) - int(before["pages_kept"])
-            if kept_now <= 0:
-                row["_no_pages_kept"] = "1"
-        if trace is not None and before is not None:
-            after = trace.as_dict()
+            counted = person_trace.as_dict()
             logger.info(
                 "pe person pages_fetched=%s pages_kept=%s pages_dropped=%s drop_reasons=%s searches_run=%s llm_calls=%s facts_extracted=%s facts_rejected=%s reject_reasons=%s",
-                int(after["pages_fetched"]) - int(before["pages_fetched"]),
-                int(after["pages_kept"]) - int(before["pages_kept"]),
-                int(after["pages_dropped"]) - int(before["pages_dropped"]),
-                {
-                    key: int(after["drop_reasons"].get(key, 0)) - int(before["drop_reasons"].get(key, 0))
-                    for key in set(after["drop_reasons"]) | set(before["drop_reasons"])
-                    if int(after["drop_reasons"].get(key, 0)) - int(before["drop_reasons"].get(key, 0))
-                },
-                int(after["searches_run"]) - int(before["searches_run"]),
-                int(after["llm_calls"]) - int(before["llm_calls"]),
-                int(after["facts_extracted"]) - int(before["facts_extracted"]),
-                int(after["facts_rejected"]) - int(before["facts_rejected"]),
-                {
-                    key: int(after["reject_reasons"].get(key, 0)) - int(before["reject_reasons"].get(key, 0))
-                    for key in set(after["reject_reasons"]) | set(before["reject_reasons"])
-                    if int(after["reject_reasons"].get(key, 0)) - int(before["reject_reasons"].get(key, 0))
-                },
+                counted["pages_fetched"],
+                counted["pages_kept"],
+                counted["pages_dropped"],
+                counted["drop_reasons"],
+                counted["searches_run"],
+                counted["llm_calls"],
+                counted["facts_extracted"],
+                counted["facts_rejected"],
+                counted["reject_reasons"],
             )
     else:
         extracted = extract_person_fields(

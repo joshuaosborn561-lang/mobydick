@@ -77,15 +77,23 @@ class Store:
         if not isinstance(data, dict):
             data = {"list": list_name, "domains": []}
         domains = domains_from_values([str(d) for d in data.get("domains") or []])
+        removed = domains_from_values([str(d) for d in data.get("removed") or []])
         data["list"] = self._normalize_list(list_name)
         data["domains"] = domains
+        data["removed"] = removed
         return data
 
-    def _write_list(self, list_name: str, domains: Iterable[str]) -> dict[str, Any]:
+    def _write_list(
+        self,
+        list_name: str,
+        domains: Iterable[str],
+        removed: Iterable[str] | None = None,
+    ) -> dict[str, Any]:
         payload = {
             "list": self._normalize_list(list_name),
             "updated_at": utc_now(),
             "domains": sorted(domains_from_values(list(domains))),
+            "removed": sorted(domains_from_values(list(removed or []))),
         }
         path = self._exclude_path(list_name)
         tmp = path.with_suffix(".json.tmp")
@@ -93,15 +101,20 @@ class Store:
         tmp.replace(path)
         return payload
 
+    def _effective_domains(self, data: dict[str, Any], list_name: str) -> set[str]:
+        removed = set(data.get("removed") or [])
+        return (set(data["domains"]) | self._same_day_domains(list_name)) - removed
+
     def exclude_count(self, list_name: str = LIST_SERIES_AB) -> dict[str, Any]:
         with _lock:
             data = self._read_list(list_name)
             same_day = self._same_day_domains(list_name)
-            combined = set(data["domains"]) | same_day
+            combined = self._effective_domains(data, list_name)
             return {
                 "list": data["list"],
                 "persisted": len(data["domains"]),
                 "same_day_files": len(same_day),
+                "removed": len(data.get("removed") or []),
                 "effective": len(combined),
                 "updated_at": data.get("updated_at"),
             }
@@ -109,7 +122,7 @@ class Store:
     def exclude_domains(self, list_name: str = LIST_SERIES_AB) -> set[str]:
         with _lock:
             data = self._read_list(list_name)
-            return set(data["domains"]) | self._same_day_domains(list_name)
+            return self._effective_domains(data, list_name)
 
     def exclude_add(self, domains: list[str], list_name: str = LIST_SERIES_AB) -> dict[str, Any]:
         incoming = domains_from_values(domains)
@@ -117,12 +130,31 @@ class Store:
             data = self._read_list(list_name)
             before = set(data["domains"])
             after = before | set(incoming)
-            written = self._write_list(list_name, after)
+            removed = set(data.get("removed") or []) - set(incoming)
+            written = self._write_list(list_name, after, removed)
             return {
                 "list": written["list"],
                 "added": len(after) - len(before),
                 "skipped_already_present": len(set(incoming) & before),
                 "total": len(after),
+                "updated_at": written["updated_at"],
+            }
+
+    def exclude_remove(self, domains: list[str], list_name: str = LIST_SERIES_AB) -> dict[str, Any]:
+        """Drop domains from the list. A removal also overrides same-day delivery files."""
+        incoming = domains_from_values(domains)
+        with _lock:
+            data = self._read_list(list_name)
+            before = set(data["domains"])
+            removed = set(data.get("removed") or []) | set(incoming)
+            after = before - set(incoming)
+            written = self._write_list(list_name, after, removed)
+            effective = (after | self._same_day_domains(list_name)) - removed
+            return {
+                "list": written["list"],
+                "removed": len(set(incoming)),
+                "total": len(after),
+                "effective": len(effective),
                 "updated_at": written["updated_at"],
             }
 
@@ -222,9 +254,12 @@ class Store:
             writer.writeheader()
             for row in rows:
                 writer.writerow({col: row.get(col, "") or "" for col in columns})
+        eligible = rows
+        if name == LIST_PE:
+            eligible = [row for row in rows if (row.get("person_verified") or "") == "yes"]
         domains = [
             normalize_domain(row.get("company_domain"))
-            for row in rows
+            for row in eligible
             if normalize_domain(row.get("company_domain"))
         ]
         self.exclude_add(domains, name)

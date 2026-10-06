@@ -45,6 +45,19 @@ class ResearchTrace:
             if len(self.not_pe_samples) < 5:
                 self.not_pe_samples.append({"firm": " ".join((firm or "").split())[:80], "phrase": label})
 
+    def merge(self, other: ResearchTrace) -> None:
+        """Add one worker's counts into the job total."""
+        with self._lock:
+            with other._lock:
+                self.counts.update(other.counts)
+                self.reject_reasons.update(other.reject_reasons)
+                self.drop_reasons.update(other.drop_reasons)
+                self.person_reasons.update(other.person_reasons)
+                self.not_pe_counts.update(other.not_pe_counts)
+                room = 5 - len(self.not_pe_samples)
+                if room > 0:
+                    self.not_pe_samples.extend(other.not_pe_samples[:room])
+
     def as_dict(self) -> dict[str, object]:
         with self._lock:
             return {
@@ -107,6 +120,20 @@ def note_not_pe(firm: str, phrase: str) -> None:
 
 def keep_fact() -> None:
     note("facts_extracted")
+
+
+@contextmanager
+def isolated() -> Iterator[ResearchTrace]:
+    """Count this worker alone, then fold the totals into the job trace."""
+    parent = _current.get()
+    child = ResearchTrace()
+    token = _current.set(child)
+    try:
+        yield child
+    finally:
+        if parent is not None:
+            parent.merge(child)
+        _current.reset(token)
 
 
 @contextmanager

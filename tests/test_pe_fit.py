@@ -152,8 +152,8 @@ def test_email_domain_must_match_the_firm_and_cfo_is_out():
     assert classify_firm("Drawdown Fund", "SEC Form D lists the offering as venture", "") == "venture capital"
     assert page_disqualifies_firm("Form D filing: venture fund") == "venture capital"
     assert page_disqualifies_firm("She left venture capital to join the private equity firm.") == ""
-    assert classify_firm("K20 Fund", "an early-stage venture capital firm", "") == "venture capital"
-    assert classify_firm("Seed Co", "a pre-seed fund", "") == "venture capital"
+    assert classify_firm("K20 Fund", "an early-stage venture capital firm", "") == "unknown"
+    assert classify_firm("Seed Co", "a pre-seed fund", "") == "unknown"
     assert firm_text_is_venture("K20 is an early-stage venture capital firm focused on software")
     assert firm_text_is_venture("She left venture capital to join the private equity firm.") is False
     assert "venture capital" in firm_self_venture_phrase(
@@ -230,6 +230,36 @@ def test_homepage_venture_claim_drops_and_a_portfolio_page_does_not(monkeypatch)
     assert dropped["firm_type"] == "venture capital"
     assert researched == ["Pat Partner"]
 
+    def estate_pages(website: str, domain: str) -> dict[str, object]:
+        return {
+            "website": website,
+            "mailing_address": "",
+            "pages": [
+                {
+                    "url": f"https://{domain}/",
+                    "text": (
+                        "Mavdon Capital specializes in commercial and multifamily real estate "
+                        "investments, venture capital, and private equity."
+                    ),
+                }
+            ],
+        }
+
+    monkeypatch.setattr("mobydick.enrich.gather_company_pages", estate_pages)
+    estate = apply_enrichment(
+        _pe(
+            company_name="Mavdon Capital",
+            company_domain="mavdon.com",
+            company_description="private equity firm",
+        ),
+        "pe_partners",
+        fetch_pages=True,
+    )
+    assert estate["dq"] == "not_pe_firm"
+    assert estate["firm_type"] == "real estate"
+    assert estate["person_verified"] == ""
+    assert researched == ["Pat Partner"]
+
 
 def test_truncated_last_name_resolves_only_from_a_real_slug():
     resolved = assess_pe(
@@ -267,8 +297,14 @@ def test_both_private_equity_and_venture_stays_and_weak_text_does_not_drop():
     )
     assert classify_firm("Celerity Partners", celerity) == "private equity"
     assert classify_firm("Exalt Capital Partners", exalt) == "private equity"
-    assert classify_firm("Mavdon Capital", mavdon) == "private equity"
+    assert classify_firm("Mavdon Capital", mavdon) == "real estate"
+    assert assess_pe(_pe(company_name="Mavdon Capital", company_description=mavdon))["dq"] == "not_pe_firm"
     assert assess_pe(_pe(company_name="Celerity Partners", company_description=celerity))["dq"] == ""
+    sector = (
+        "Northline Capital is a private equity firm that has backed software, healthcare, "
+        "and real estate companies."
+    )
+    assert classify_firm("Northline Capital", sector) == "private equity"
     assert firm_self_venture_phrase("Celerity Partners", celerity, blurb=True) == ""
     assert firm_text_is_venture(celerity) is False
 
@@ -293,6 +329,25 @@ def test_both_private_equity_and_venture_stays_and_weak_text_does_not_drop():
     assert assess_pe(_pe(company_name="Navigation Capital Partners", company_description=chrome))["dq"] == ""
     assert assess_pe(_pe(company_name="Open Prairie", company_description=menu))["dq"] == ""
     assert assess_pe(_pe(company_name="Invergarry Holdings", company_description=truncated))["dq"] == ""
+    conference = (
+        "Venture Capital Fund Washington D.C. Troy's Tabor Family Office Conference "
+        "is always a great event."
+    )
+    orchard = (
+        "It provides operational and investing expertise with a team that has built multiple "
+        "billion-dollar revenue companies and has closed transactions totaling over $"
+    )
+    prairie = (
+        "The Open Prairie team has consistently focused on facilitating capital accessibility "
+        "in underserved markets and has managed investment portfolios ranging from t"
+    )
+    assert firm_self_venture_phrase("Orchard Ventures", conference, blurb=True) == ""
+    assert classify_firm("Orchard Ventures", conference) == "unknown"
+    assert assess_pe(_pe(company_name="Orchard Ventures", company_description=conference))["dq"] == ""
+    assert classify_firm("Orchard Ventures", orchard) == "unknown"
+    assert assess_pe(_pe(company_name="Orchard Ventures", company_description=orchard))["dq"] == ""
+    assert classify_firm("Open Prairie Ventures", prairie) == "unknown"
+    assert assess_pe(_pe(company_name="Open Prairie Ventures", company_description=prairie))["dq"] == ""
     blank = assess_pe(_pe(company_description="", company_industry=""))
     assert blank["firm_type"] == "unknown"
     assert blank["dq"] == ""

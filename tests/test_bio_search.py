@@ -20,6 +20,33 @@ def _silence_network(monkeypatch) -> None:
     monkeypatch.setattr("mobydick.research.life.linkedin_posts", lambda *args, **kwargs: [])
 
 
+def test_research_workers_keep_separate_counters():
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mobydick.research.trace import isolated, note
+
+    with tracing() as parent:
+
+        def work(pages: int) -> dict:
+            with isolated() as child:
+                note("pages_fetched", pages)
+                note("searches_run", 1)
+                return child.as_dict()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = []
+            for pages in (3, 7):
+                ctx = contextvars.copy_context()
+                futures.append(pool.submit(ctx.run, work, pages))
+            snaps = [future.result() for future in futures]
+    assert sorted(snap["pages_fetched"] for snap in snaps) == [3, 7]
+    assert all(snap["searches_run"] == 1 for snap in snaps)
+    total = parent.as_dict()
+    assert total["pages_fetched"] == 10
+    assert total["searches_run"] == 2
+
+
 def test_homepage_link_points_at_the_real_team_page():
     urls = candidate_bio_urls(HOME, "https://anacapapartners.com", "Jeff", "Stevens")
     assert urls
@@ -220,7 +247,7 @@ def test_alumni_search_runs_even_without_a_team_bio(monkeypatch):
     monkeypatch.setattr("mobydick.research.life.linkedin_posts", lambda *args, **kwargs: [])
     queries: list[str] = []
     article = (
-        "Robert Knox was born in Boston and grew up there. "
+        "Robert Knox of Cornerstone Equity was born in Boston and grew up there. "
         "He earned a BA from Boston University."
     )
 

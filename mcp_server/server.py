@@ -292,6 +292,19 @@ def exclude_add(domains: list[str], list_name: str = "series_ab") -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        title="Remove domains from the exclude list",
+        readOnlyHint=False,
+        openWorldHint=False,
+        destructiveHint=False,
+    )
+)
+def exclude_remove(domains: list[str], list_name: str = "series_ab") -> str:
+    """Take domains off the exclude list, including ones in today's delivery files."""
+    return _json(_store().exclude_remove(domains, list_name))
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         title="Check domains against the exclude list",
         readOnlyHint=True,
         openWorldHint=False,
