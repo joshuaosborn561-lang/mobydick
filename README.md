@@ -46,7 +46,7 @@ Series A/B:
 
 PE partners:
 
-`first_name,last_name,full_name,email,title,company_name,company_domain,company_website,linkedin_url,location,mailing_address,hometown_or_from,family_background,college,military_service,early_jobs,why_got_into_pe,beliefs_or_causes,life_events,quotes,real_story,best_emotional_hook,firm_type,source_notes,confidence,sources,research_note`
+`first_name,last_name,full_name,email,title,company_name,company_domain,company_website,linkedin_url,location,firm_mailing_address,hometown_or_from,family_background,college,military_service,early_jobs,why_got_into_pe,beliefs_or_causes,life_events,quotes,real_story,best_emotional_hook,firm_type,source_notes,confidence,sources,research_note`
 
 ## Setup
 

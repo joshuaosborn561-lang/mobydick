@@ -410,6 +410,8 @@ def classify_firm(name: str, description: str, industry: str = "", domain: str =
     """Honest firm label. Unknown stays unknown. Never defaults to private equity."""
     blob = _strip_advisory(f"{name or ''} {description or ''}")
     industry_text = (industry or "").lower()
+    if _FORM_D_VENTURE.search(f"{description or ''} {industry or ''}"):
+        return "venture capital"
     if _BROKER.search(blob):
         return "broker-dealer"
     if _looks_like_vc(name, description, domain):
@@ -499,10 +501,19 @@ def align_firm_domain(raw: dict[str, str]) -> tuple[str, str]:
     return listed or firm, ""
 
 
+_FORM_D_VENTURE = re.compile(
+    r"\bform\s*d\b.{0,300}\bventure(?:\s+capital|\s+fund)?\b|"
+    r"\bventure(?:\s+capital|\s+fund)?\b.{0,300}\bform\s*d\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 def page_disqualifies_firm(page_text: str) -> str:
-    """A team page can show a broker-dealer that the short description hid."""
+    """A team page or filing can show a broker-dealer or a venture Form D."""
     if _BROKER.search(page_text or ""):
         return "broker-dealer"
+    if _FORM_D_VENTURE.search(page_text or ""):
+        return "venture capital"
     return ""
 
 
