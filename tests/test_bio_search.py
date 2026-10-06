@@ -1,4 +1,4 @@
-from mobydick.research.life import extract_life_story, gather_person_sources
+from mobydick.research.life import _search_queries, extract_life_story, gather_person_sources
 from mobydick.research.trace import tracing
 from mobydick.research.web import candidate_bio_urls
 
@@ -259,3 +259,59 @@ def test_alumni_search_runs_even_without_a_team_bio(monkeypatch):
     life = extract_life_story("Robert Knox", sources, firm="Cornerstone Equity Investors")
     assert "Boston" in life["hometown"]
     assert "grew up" in life["hometown"].lower() or "born" in life["hometown"].lower()
+
+
+def test_full_search_uses_about_ten_targeted_queries():
+    queries = _search_queries("Ada Partner", "Northline Capital", "northline.com", full_search=True)
+    assert 8 <= len(queries) <= 10
+    blob = " ".join(queries)
+    assert "site:northline.com" in blob
+    assert "podcast" in blob
+    assert "alumni" in blob
+    assert "obituary" in blob or "wedding" in blob
+    assert "local news" in blob or "gazette" in blob
+    assert "charity" in blob or "nonprofit" in blob
+    light = _search_queries("Ada Partner", "Northline Capital", "northline.com", full_search=False)
+    assert len(light) < len(queries)
+    assert any("podcast" in query for query in light)
+
+
+def test_empty_bio_page_falls_back_to_a_rendered_fetch(monkeypatch):
+    _silence_network(monkeypatch)
+    rendered: list[str] = []
+
+    def fake_fetch(url: str, **kwargs: object) -> tuple[str, str]:
+        if url.rstrip("/").endswith("/team/alex-szewczyk"):
+            fake_fetch.last_status = 200
+            return "", ""
+        if url.rstrip("/").endswith("/missing-bio"):
+            fake_fetch.last_status = 404
+            return "", ""
+        fake_fetch.last_status = 200
+        return (
+            '<a href="/team/alex-szewczyk">Alex Szewczyk</a><a href="/missing-bio">Old</a>',
+            "Alex Szewczyk",
+        )
+
+    def fake_render(url: str) -> str:
+        rendered.append(url)
+        if "alex-szewczyk" in url:
+            return "Alex Szewczyk Managing Partner. Mr. Szewczyk grew up in Dallas, Texas."
+        return ""
+
+    monkeypatch.setattr("mobydick.research.life.fetch_document", fake_fetch)
+    monkeypatch.setattr("mobydick.research.life.fetch_rendered_page", fake_render)
+    sources = gather_person_sources(
+        {
+            "full_name": "Alex Szewczyk",
+            "first_name": "Alex",
+            "last_name": "Szewczyk",
+            "company_name": "BP Energy Partners",
+            "company_domain": "bpenergypartners.com",
+            "company_website": "https://bpenergypartners.com",
+        }
+    )
+    assert any("alex-szewczyk" in url for url in rendered)
+    assert not any(url.rstrip("/").endswith("/missing-bio") for url in rendered)
+    life = extract_life_story("Alex Szewczyk", sources)
+    assert "Dallas" in life["hometown"]

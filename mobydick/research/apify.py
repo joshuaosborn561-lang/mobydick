@@ -16,6 +16,8 @@ logger = logging.getLogger("mobydick.research.apify")
 
 # LinkedIn posts stay on APIFY_ACTOR. Web search uses Apify's Google Search actor.
 GOOGLE_SEARCH_ACTOR = "apify~google-search-scraper"
+# Renders JS pages when a plain GET comes back empty or blocked.
+RENDER_ACTOR = "apify~website-content-crawler"
 
 
 def run_actor(
@@ -142,3 +144,36 @@ def google_search(query: str, *, limit: int = 8) -> list[dict[str, str]]:
     results = _organic_results(items, limit)
     logger.info("google search results=%s", len(results))
     return results
+
+
+def fetch_rendered_page(url: str) -> str:
+    """Visible text from Apify's website crawler. Empty without APIFY_API_KEY."""
+    from mobydick.research.trace import note
+
+    url = (url or "").strip()
+    key = os.environ.get("APIFY_API_KEY", "").strip() or default_settings.apify_api_key
+    if not url or not key:
+        return ""
+    note("pages_rendered")
+    cfg = replace(default_settings, apify_api_key=key, apify_actor=RENDER_ACTOR)
+    items = run_actor(
+        {
+            "startUrls": [{"url": url}],
+            "maxCrawlPages": 1,
+            "maxCrawlDepth": 0,
+            "crawlerType": "playwright:adaptive",
+            "saveHtml": False,
+            "saveMarkdown": True,
+            "htmlTransformer": "readableText",
+            "removeCookieWarnings": True,
+        },
+        settings=cfg,
+        wait_secs=60,
+    )
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or item.get("markdown") or "")
+        if text.strip():
+            return text.strip()
+    return ""

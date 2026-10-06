@@ -125,12 +125,15 @@ def build_enriched_list(
     overfetch: float = 2.0,
     background: bool = True,
     enrich: bool = True,
+    story_first: bool = True,
 ) -> str:
     """Pull, de-dupe, enrich, and write one CSV.
 
     audience = series_ab | pe_partners
     count = how many NEW unique companies to deliver
     filters = optional GetLeads overrides (job_titles, industries, states, ...)
+    story_first defaults on for pe_partners. A row ships only with a cited personal fact.
+    If the scan cap is hit first, the shortfall is the number still missing.
     Long jobs return job_id. Poll get_job_status. Never dumps the list into chat.
     """
     _ensure_cwd()
@@ -155,6 +158,7 @@ def build_enriched_list(
             require_email=require_email,
             overfetch=overfetch,
             enrich=enrich,
+            story_first=story_first,
             progress=on_progress,
         )
 

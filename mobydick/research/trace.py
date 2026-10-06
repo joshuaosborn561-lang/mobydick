@@ -31,6 +31,7 @@ class ResearchTrace:
             "pages_with_text": self.counts["pages_with_text"],
             "pages_kept": self.counts["pages_kept"],
             "pages_dropped": self.counts["pages_dropped"],
+            "pages_rendered": self.counts["pages_rendered"],
             "drop_reasons": dict(sorted(self.drop_reasons.items())),
             "searches_run": self.counts["searches_run"],
             "llm_calls": self.counts["llm_calls"],
