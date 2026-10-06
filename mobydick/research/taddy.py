@@ -34,6 +34,9 @@ def search_episodes(
     cfg = settings or default_settings
     if not (cfg.taddy_api_key and cfg.taddy_user_id and term.strip()):
         return []
+    from mobydick.research.trace import note
+
+    note("searches_run")
     session = http or requests.Session()
     try:
         resp = session.post(

@@ -114,6 +114,12 @@ def overfetch_count(requested: int, multiplier: float = 2.0) -> int:
     return max(int(requested), int(round(requested * clamped)))
 
 
+def pe_scan_cap(requested: int) -> int:
+    """Most GetLeads rows a PE pull will scan while it tries to fill the ask."""
+    wanted = max(1, int(requested))
+    return min(2000, max(40, wanted * 8))
+
+
 def default_filters(
     audience: str,
     *,

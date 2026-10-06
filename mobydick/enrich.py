@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
 from mobydick.audiences import PE_PARTNERS, normalize_audience
 from mobydick.pe_fit import assess_pe, last_name_from_text, page_disqualifies_firm
 from mobydick.research.extract import extract_person_fields
 from mobydick.research.life import NO_MODEL_WARNING, extract_life_story, gather_person_sources, llm_keys_present
+from mobydick.research.trace import current
 from mobydick.research.web import gather_company_pages
 from mobydick.schemas import empty_row
 from mobydick.store import LIST_PE
+
+logger = logging.getLogger("mobydick.enrich")
 
 
 FOUNDER_TITLE_HINTS = ("founder", "ceo", "chief executive")
@@ -70,6 +74,8 @@ def apply_enrichment(
         row["mailing_address"] = pages["mailing_address"]
 
     if name == PE_PARTNERS:
+        trace = current()
+        before = trace.as_dict() if trace is not None else None
         life_sources: list[dict[str, str]] = []
         if screened.get("unresolved_name") and not pe_dq and not fetch_pages:
             pe_dq = "truncated_name"
@@ -119,6 +125,22 @@ def apply_enrichment(
         row["sources"] = life.get("sources") or ""
         row["confidence"] = life.get("confidence") or "low"
         row["dq"] = pe_dq
+        if trace is not None and before is not None:
+            after = trace.as_dict()
+            logger.info(
+                "pe person pages_fetched=%s pages_kept=%s searches_run=%s llm_calls=%s facts_extracted=%s facts_rejected=%s reject_reasons=%s",
+                int(after["pages_fetched"]) - int(before["pages_fetched"]),
+                int(after["pages_kept"]) - int(before["pages_kept"]),
+                int(after["searches_run"]) - int(before["searches_run"]),
+                int(after["llm_calls"]) - int(before["llm_calls"]),
+                int(after["facts_extracted"]) - int(before["facts_extracted"]),
+                int(after["facts_rejected"]) - int(before["facts_rejected"]),
+                {
+                    key: int(after["reject_reasons"].get(key, 0)) - int(before["reject_reasons"].get(key, 0))
+                    for key in set(after["reject_reasons"]) | set(before["reject_reasons"])
+                    if int(after["reject_reasons"].get(key, 0)) - int(before["reject_reasons"].get(key, 0))
+                },
+            )
     else:
         extracted = extract_person_fields(
             row.get("full_name") or "",

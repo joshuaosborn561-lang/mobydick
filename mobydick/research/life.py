@@ -10,10 +10,11 @@ from typing import Any
 from urllib.parse import urljoin
 
 from mobydick.config import settings as default_settings
-from mobydick.research.apify import linkedin_posts
+from mobydick.research.apify import google_search, linkedin_posts
 from mobydick.research.extract import llm_extract
 from mobydick.research.taddy import search_episodes
-from mobydick.research.web import company_url, fetch_text
+from mobydick.research.trace import keep_fact, note, reject
+from mobydick.research.web import candidate_bio_urls, company_url, fetch_document, host_key
 from mobydick.research.youtube import talks_with_transcripts
 
 logger = logging.getLogger("mobydick.research.life")
@@ -86,6 +87,15 @@ _NOT_A_PERSON = {
     "analyst",
     "associate",
     "officer",
+    "fitness",
+    "company",
+    "inc",
+    "llc",
+    "consulting",
+    "resources",
+    "solutions",
+    "systems",
+    "services",
 }
 _RESUME = re.compile(
     r"\b(years of experience|series 7|series 63|finra|progressively senior)\b",
@@ -121,7 +131,9 @@ _MILITARY = re.compile(
 )
 _EARLY = re.compile(
     r"\b(first job|before private equity|founded|co-founded|cofounded|food truck|restaurant|"
-    r"family business|worked as|started a|started an|started my)\b",
+    r"family business|worked as|worked at|worked for|started a|started an|started my|"
+    r"prior to|previously|before joining|before founding|served as|was the ceo|was ceo|"
+    r"began his career|began her career|started his career|started her career)\b",
     re.IGNORECASE,
 )
 _CAUSES = re.compile(
@@ -306,7 +318,8 @@ def passage_for_source(source: dict[str, str], first: str, last: str) -> str:
     kind = (source.get("kind") or "").lower()
     titled = _mentions(title, last) and (not first or _mentions(title, first))
     if kind in {"interview", "podcast", "transcript"} and titled:
-        return "" if is_junk(text) else text
+        # Sentence filters still drop other people. A real interview names more than one person.
+        return "" if is_junk(text) and not _mentions(text, last) else text
     if kind == "interview" and "linkedin" in (source.get("url") or "").lower():
         if is_junk(text) or _other_people(text, first, last):
             return ""
@@ -314,15 +327,24 @@ def passage_for_source(source: dict[str, str], first: str, last: str) -> str:
     return bio_for(text, first, last)
 
 
+def _opens_with_person(text: str, first: str, last: str) -> bool:
+    """A split bio starts with the person's name. Later sentences often use only the first name."""
+    opening = (text or "")[:120]
+    if not first or not last:
+        return False
+    return _mentions(opening, first) and _mentions(opening, last)
+
+
 def _sentence_about(sentence: str, first: str, last: str, passage_is_theirs: bool) -> bool:
     if _blocked(sentence) or is_junk(sentence):
         return False
-    others = _other_people(sentence, first, last)
-    if others:
-        return False
     if _mentions(sentence, last):
         return True
-    return bool(passage_is_theirs and _ABOUT.search(sentence))
+    if passage_is_theirs and first and _mentions(sentence, first):
+        return True
+    if passage_is_theirs and _ABOUT.search(sentence) and not _other_people(sentence, first, last):
+        return True
+    return False
 
 
 def _quote_ok(source: dict[str, str]) -> bool:
@@ -365,29 +387,47 @@ def _heuristic_from_passages(full_name: str, passages: list[dict[str, str]]) -> 
     for source in passages:
         url = source.get("url") or ""
         titled = _mentions(source.get("title") or "", last) and (not first or _mentions(source.get("title") or "", first))
-        passage_is_theirs = titled or _heading_is_person(source.get("text") or "", first, last) or not _other_people(source.get("text") or "", first, last)
+        passage_is_theirs = titled or _opens_with_person(source.get("text") or "", first, last)
         for sentence in _sentences(source.get("text") or ""):
-            if not _sentence_about(sentence, first, last, passage_is_theirs):
-                continue
-            if _RESUME.search(sentence) and not (
-                _HOMETOWN.search(sentence) or _FAMILY.search(sentence) or _MILITARY.search(sentence) or _COLLEGE.search(sentence)
-            ):
-                continue
+            about = _sentence_about(sentence, first, last, passage_is_theirs)
+            resume_only = bool(_RESUME.search(sentence)) and not (
+                _HOMETOWN.search(sentence)
+                or _FAMILY.search(sentence)
+                or _MILITARY.search(sentence)
+                or _COLLEGE.search(sentence)
+            )
             clipped = _clip(sentence)
-            hometown_hit = _HOMETOWN.search(sentence) and not _FIRM_VOICE.search(sentence)
-            _take(found, cites, "hometown", hometown_hit, clipped, url)
-            _take(found, cites, "family_background", _FAMILY.search(sentence), clipped, url)
-            _take(found, cites, "college", _COLLEGE.search(sentence), clipped, url)
-            _take(found, cites, "military_service", _MILITARY.search(sentence), clipped, url)
-            _take(found, cites, "early_jobs", _EARLY.search(sentence), clipped, url)
-            _take(found, cites, "causes", _CAUSES.search(sentence), clipped, url)
-            _take(found, cites, "life_events", _EVENTS.search(sentence), clipped, url)
-            if _WHY.search(sentence) and (_FIRST_PERSON.search(sentence) or _WHY_PERSONAL.search(sentence)):
-                _take(found, cites, "why", True, clipped, url)
+
+            def consider(key: str, matched: Any, value: str = clipped) -> None:
+                if not matched or found.get(key):
+                    return
+                if not about:
+                    if is_junk(sentence):
+                        reject("junk")
+                    elif _other_people(sentence, first, last):
+                        reject("other_person")
+                    else:
+                        reject("not_about_person")
+                    return
+                if resume_only and key not in {"hometown", "family_background", "military_service", "college"}:
+                    reject("resume_only")
+                    return
+                _take(found, cites, key, True, value, url)
+                if found.get(key):
+                    keep_fact()
+
+            consider("hometown", _HOMETOWN.search(sentence) and not _FIRM_VOICE.search(sentence))
+            consider("family_background", _FAMILY.search(sentence))
+            consider("college", _COLLEGE.search(sentence))
+            consider("military_service", _MILITARY.search(sentence))
+            consider("early_jobs", _EARLY.search(sentence))
+            consider("causes", _CAUSES.search(sentence))
+            consider("life_events", _EVENTS.search(sentence))
+            consider("why", _WHY.search(sentence) and (_FIRST_PERSON.search(sentence) or _WHY_PERSONAL.search(sentence)))
             if _quote_ok(source):
                 quoted = _QUOTE.search(sentence)
                 if quoted and _sentence_about(quoted.group(1), first, last, True):
-                    _take(found, cites, "quotes", True, _clip(quoted.group(1)), url)
+                    consider("quotes", True, _clip(quoted.group(1)))
     return found, cites
 
 
@@ -434,15 +474,32 @@ def _llm_fill(full_name: str, firm: str, passages: list[dict[str, str]], found: 
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
         openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
     )
+    note("llm_calls")
+    provider = "anthropic" if cfg.anthropic_api_key else "openai"
+    logger.info("pe llm_call provider=%s", provider)
     parsed = llm_extract(prompt, settings=cfg) or {}
+    if not any(str(parsed.get(key) or "").strip() for key in (*_LIFE_KEYS, "why")):
+        reject("llm_empty")
+        return
     corpus = "\n".join(source.get("text") or "" for source in passages)
     for key in (*_LIFE_KEYS, "why"):
         if found.get(key):
             continue
-        grounded = _ground_quote(str(parsed.get(key) or ""), corpus)
-        if not grounded or is_junk(grounded) or not _sentence_about(grounded, first, last, True):
+        raw_value = str(parsed.get(key) or "").strip()
+        if not raw_value:
+            continue
+        grounded = _ground_quote(raw_value, corpus)
+        if not grounded:
+            reject("not_grounded")
+            continue
+        if is_junk(grounded):
+            reject("junk")
+            continue
+        if not _sentence_about(grounded, first, last, True):
+            reject("not_about_person")
             continue
         found[key] = _clip(grounded)
+        keep_fact()
         url = _cite_for(grounded, passages)
         if url:
             cites[key] = url
@@ -516,83 +573,189 @@ def _thin(sources: list[dict[str, str]]) -> bool:
     return len(text.strip()) < 280
 
 
-def gather_person_sources(row: dict[str, str]) -> list[dict[str, str]]:
-    """Podcasts, interviews, and bios that actually name the person."""
-    sources: list[dict[str, str]] = []
-    full = row.get("full_name") or ""
-    last = row.get("last_name") or last_name_of(full)
-    firm = row.get("company_name") or ""
-    base = company_url(row.get("company_website") or "", row.get("company_domain") or "")
-    first = row.get("first_name") or _split_name(full)[0]
-    paths = list(TEAM_PATHS)
+_SKIP_FETCH_HOSTS = {
+    "linkedin.com",
+    "facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "x.com",
+    "tiktok.com",
+    "youtube.com",
+    "youtu.be",
+}
+
+
+def _skip_fetch(url: str) -> bool:
+    host = host_key(url)
+    return any(host == blocked or host.endswith("." + blocked) for blocked in _SKIP_FETCH_HOSTS)
+
+
+def _bio_paths(first: str, last: str) -> list[str]:
+    paths = list(TEAM_PATHS) + ["/about-us", "/professionals", "/our-people"]
     if first and last and len(re.sub(r"[^A-Za-z]", "", last)) > 1:
         slug = re.sub(r"[^a-z-]", "", f"{first}-{last}".lower())
         if slug:
             paths.extend((f"/team/{slug}", f"/people/{slug}", f"/leadership/{slug}"))
+    return paths
+
+
+def _has_bio(sources: list[dict[str, str]]) -> bool:
+    return any(source.get("kind") == "bio" and source.get("text") for source in sources)
+
+
+def gather_person_sources(row: dict[str, str]) -> list[dict[str, str]]:
+    """Firm bios found from the site's own links or web search, plus interviews."""
+    sources: list[dict[str, str]] = []
+    seen: set[str] = set()
+    full = row.get("full_name") or ""
+    last = row.get("last_name") or last_name_of(full)
+    first = row.get("first_name") or _split_name(full)[0]
+    firm = row.get("company_name") or ""
+    domain = row.get("company_domain") or ""
+    base = company_url(row.get("company_website") or "", domain)
+
+    def store(url: str, title: str, text: str, kind: str) -> None:
+        passage = passage_for_source(
+            {"url": url, "title": title, "text": text, "kind": kind},
+            first,
+            last,
+        )
+        if not passage:
+            return
+        sources.append({"url": url, "title": title, "text": passage[:8000], "kind": kind})
+        note("pages_kept")
+
+    def fetch_unique(url: str) -> tuple[str, str]:
+        key = (url or "").split("#")[0].rstrip("/")
+        if not key or key in seen or _skip_fetch(url):
+            return "", ""
+        seen.add(key)
+        try:
+            return fetch_document(url)
+        except Exception:
+            logger.exception("page fetch failed")
+            return "", ""
+
     if base and last:
-        seen_urls: set[str] = set()
-        for path in paths:
-            url = urljoin(base + "/", path.lstrip("/"))
-            if url in seen_urls:
+        home_html, _home_text = fetch_unique(base)
+        discovered = candidate_bio_urls(home_html, base, first, last)
+        guessed = [urljoin(base + "/", path.lstrip("/")) for path in _bio_paths(first, last)]
+        queue: list[str] = []
+        queued: set[str] = set()
+        for url in discovered + guessed:
+            key = url.split("#")[0].rstrip("/")
+            if key not in queued:
+                queued.add(key)
+                queue.append(url)
+        fetched = 0
+        while queue and fetched < 8 and not _has_bio(sources):
+            url = queue.pop(0)
+            html, text = fetch_unique(url)
+            fetched += 1
+            if not text:
                 continue
-            seen_urls.add(url)
-            try:
-                text = fetch_text(url)
-            except Exception:
-                logger.exception("bio page failed for %s", url)
-                text = ""
-            passage = passage_for_identity(text, first, last) if text else ""
-            if passage:
-                sources.append({"url": url, "title": f"{firm} bio", "text": passage[:8000], "kind": "bio"})
+            before = len(sources)
+            store(url, f"{firm} bio", text, "bio")
+            if len(sources) == before:
+                for extra in candidate_bio_urls(html, url, first, last):
+                    key = extra.split("#")[0].rstrip("/")
+                    if key not in queued and key not in seen:
+                        queued.add(key)
+                        queue.append(extra)
+
+    _add_search_pages(
+        full,
+        firm,
+        domain,
+        base,
+        first,
+        last,
+        store,
+        fetch_unique,
+        need_bio=not _has_bio(sources),
+    )
+
     try:
         talks = talks_with_transcripts(full, firm, max_videos=2)
     except Exception:
-        logger.exception("youtube lookup failed for %s", full)
+        logger.exception("youtube lookup failed")
         talks = []
     for talk in talks:
         text = talk.get("transcript") or talk.get("description") or ""
         title = str(talk.get("title") or "")
-        if _mentions(f"{title} {text}", last):
-            sources.append(
-                {
-                    "url": str(talk.get("url") or ""),
-                    "title": title,
-                    "text": str(text)[:12000],
-                    "kind": "interview",
-                }
-            )
+        if text and _mentions(f"{title} {text}", last):
+            store(str(talk.get("url") or ""), title, str(text)[:12000], "interview")
     try:
         episodes = search_episodes(f"{full} {firm}".strip())[:3]
     except Exception:
-        logger.exception("taddy lookup failed for %s", full)
+        logger.exception("podcast lookup failed")
         episodes = []
     for episode in episodes:
         title = str(episode.get("name") or "")
         text = f"{title} {episode.get('description') or ''}"
         if _mentions(text, last):
-            sources.append(
-                {
-                    "url": str(episode.get("audioUrl") or ""),
-                    "title": title,
-                    "text": text[:8000],
-                    "kind": "podcast",
-                }
-            )
+            store(str(episode.get("audioUrl") or ""), title, text[:8000], "podcast")
     if _thin(sources) and row.get("linkedin_url"):
         try:
             posts = linkedin_posts(row["linkedin_url"])
         except Exception:
-            logger.exception("apify lookup failed for %s", full)
+            logger.exception("linkedin posts lookup failed")
             posts = []
         for post in posts:
             text = _post_text(post)
             if text and _mentions(text, last):
-                sources.append(
-                    {
-                        "url": str(post.get("url") or post.get("postUrl") or row.get("linkedin_url") or ""),
-                        "title": "LinkedIn post",
-                        "text": text[:4000],
-                        "kind": "interview",
-                    }
+                store(
+                    str(post.get("url") or post.get("postUrl") or row.get("linkedin_url") or ""),
+                    "LinkedIn post",
+                    text[:4000],
+                    "interview",
                 )
     return sources
+
+
+def _add_search_pages(
+    full: str,
+    firm: str,
+    domain: str,
+    base: str,
+    first: str,
+    last: str,
+    store: Any,
+    fetch_unique: Any,
+    *,
+    need_bio: bool,
+) -> None:
+    """Find the bio page and interviews. Apify Google search when a key is set."""
+    if not full:
+        return
+    queries: list[str] = []
+    host = host_key(base) or (domain or "").lower().removeprefix("www.")
+    if need_bio and host:
+        queries.append(f'site:{host} "{full}"')
+    if firm:
+        queries.append(f'"{full}" "{firm}" interview')
+    elif full:
+        queries.append(f'"{full}" interview')
+    fetched = 0
+    for query in queries:
+        try:
+            results = google_search(query)
+        except Exception:
+            logger.exception("web search failed")
+            results = []
+        for result in results:
+            if fetched >= 4:
+                return
+            url = result.get("url") or ""
+            if not url or _skip_fetch(url):
+                continue
+            title = result.get("title") or ""
+            kind = "interview" if re.search(r"interview|podcast", f"{title} {url}", re.IGNORECASE) else "bio"
+            if not need_bio and kind == "bio" and host and host_key(url) == host:
+                continue
+            _html, text = fetch_unique(url)
+            fetched += 1
+            if text:
+                store(url, title or firm or "search", text, kind)
+            elif result.get("description") and _mentions(result["description"], last):
+                store(url, title or "search", result["description"], kind)
