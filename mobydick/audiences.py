@@ -115,9 +115,14 @@ def overfetch_count(requested: int, multiplier: float = 2.0) -> int:
     return max(int(requested), int(round(requested * clamped)))
 
 
-def pe_scan_cap(requested: int) -> int:
-    """Most GetLeads rows a PE pull will scan while it tries to fill the ask."""
+def pe_scan_cap(requested: int, story_first: bool = False) -> int:
+    """Most GetLeads rows a PE pull will scan while it tries to fill the ask.
+
+    Story-first keeps paging further, because resume-only rows do not count.
+    """
     wanted = max(1, int(requested))
+    if story_first:
+        return min(2000, wanted * 30)
     return min(2000, max(40, wanted * 8))
 
 

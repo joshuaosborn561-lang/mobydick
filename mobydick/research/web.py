@@ -132,18 +132,51 @@ def page_links(html: str, base: str) -> list[tuple[str, str]]:
     return found
 
 
+_NOT_A_FIRST = {
+    "partner",
+    "director",
+    "managing",
+    "principal",
+    "founder",
+    "president",
+    "capital",
+    "group",
+    "team",
+    "about",
+    "contact",
+}
+
+
+def _first_name_in(blob: str, first: str) -> bool:
+    """Dan in a slug counts for Daniel. An unrelated first name does not."""
+    if not first:
+        return True
+    if re.search(rf"\b{re.escape(first)}\b", blob or "", re.IGNORECASE):
+        return True
+    key = re.sub(r"[^a-z]", "", first.lower())
+    if len(key) < 3 or key in _NOT_A_FIRST:
+        return False
+    for token in re.findall(r"[A-Za-z]{3,}", blob or ""):
+        word = token.lower()
+        if word in _NOT_A_FIRST:
+            continue
+        short, long = (word, key) if len(word) <= len(key) else (key, word)
+        if long.startswith(short) and len(long) - len(short) <= 6:
+            return True
+    return False
+
+
 def candidate_bio_urls(html: str, base: str, first: str, last: str) -> list[str]:
     """Same-site links that name the person, then links that look like a team page."""
     named: list[str] = []
     team: list[str] = []
     seen: set[str] = set()
     last_re = re.compile(rf"\b{re.escape(last)}\b", re.IGNORECASE) if last else None
-    first_re = re.compile(rf"\b{re.escape(first)}\b", re.IGNORECASE) if first else None
     for url, text in page_links(html, base):
         if url in seen or not same_site(url, base):
             continue
         blob = f"{url} {text}"
-        if last_re and last_re.search(blob) and (not first_re or first_re.search(blob)):
+        if last_re and last_re.search(blob) and _first_name_in(blob, first):
             named.append(url)
             seen.add(url)
         elif _TEAMISH.search(blob):

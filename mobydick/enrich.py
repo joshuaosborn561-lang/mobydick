@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from mobydick.audiences import PE_PARTNERS, normalize_audience
-from mobydick.pe_fit import assess_pe, firm_text_is_venture, last_name_from_text, page_disqualifies_firm
+from mobydick.pe_fit import assess_pe, firm_self_venture_phrase, last_name_from_text, page_disqualifies_firm
 from mobydick.research.extract import extract_person_fields
 from mobydick.research.life import (
     NO_MODEL_WARNING,
     extract_life_story,
-    firm_venture_snippets,
     gather_person_sources,
     llm_keys_present,
 )
-from mobydick.research.trace import current
+from mobydick.research.trace import current, drop_person, note_not_pe
 from mobydick.research.web import gather_company_pages
 from mobydick.schemas import empty_row
 from mobydick.store import LIST_PE
@@ -24,6 +24,21 @@ logger = logging.getLogger("mobydick.enrich")
 
 
 FOUNDER_TITLE_HINTS = ("founder", "ceo", "chief executive")
+_IDENTITY_PATHS = {"/", "/about", "/about-us", "/who-we-are", "/company", "/our-firm", "/our-story"}
+
+
+def _identity_text(pages: list[dict[str, Any]]) -> str:
+    """Homepage and about text only. Team bios and contact pages are not the firm speaking."""
+    chunks: list[str] = []
+    for page in pages:
+        path = urlparse(str(page.get("url") or "")).path.lower() or "/"
+        if path != "/" and path.endswith("/"):
+            path = path[:-1]
+        if not path.startswith("/"):
+            path = "/" + path
+        if path in _IDENTITY_PATHS:
+            chunks.append(str(page.get("text") or ""))
+    return "\n".join(chunks)[:8000]
 
 
 def disqualify(row: dict[str, str], audience: str) -> str:
@@ -88,12 +103,16 @@ def apply_enrichment(
         life_sources: list[dict[str, str]] = []
         if screened.get("unresolved_name") and not pe_dq and not fetch_pages:
             pe_dq = "truncated_name"
+        venture_phrase = ""
         if fetch_pages and not pe_dq:
-            site_text = " ".join((page.get("text") or "") for page in (pages.get("pages") or []))[:6000]
-            snippets = firm_venture_snippets(row.get("company_name") or "")
-            if firm_text_is_venture(f"{raw.get('company_description') or ''}\n{site_text}\n{snippets}"):
+            venture_phrase = firm_self_venture_phrase(
+                row.get("company_name") or "",
+                _identity_text(pages.get("pages") or []),
+            )
+            if venture_phrase:
                 row["firm_type"] = "venture capital"
                 pe_dq = "not_pe_firm"
+                note_not_pe(row.get("company_name") or "", venture_phrase)
         if fetch_pages and not pe_dq:
             if raw.get("_footprint_hits"):
                 row["_footprint_hits"] = raw["_footprint_hits"]
@@ -146,6 +165,12 @@ def apply_enrichment(
         row["sources"] = life.get("sources") or ""
         row["confidence"] = life.get("confidence") or "low"
         row["dq"] = pe_dq
+        if pe_dq:
+            drop_person(pe_dq)
+        elif fetch_pages and before is not None and trace is not None:
+            kept_now = int(trace.as_dict()["pages_kept"]) - int(before["pages_kept"])
+            if kept_now <= 0:
+                row["_no_pages_kept"] = "1"
         if trace is not None and before is not None:
             after = trace.as_dict()
             logger.info(

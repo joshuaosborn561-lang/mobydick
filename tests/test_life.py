@@ -233,3 +233,31 @@ def test_the_current_firm_is_not_an_early_job():
     )
     assert "BancBoston" in life["early_jobs"]
     assert "Managing Director at Invision" not in life["early_jobs"]
+
+
+def test_polaris_bio_keeps_hockey_and_family_when_the_site_says_dan():
+    """Job 32511fe76ab9 fetched polarisgrowthfund.com/team_member/dan-lombard and kept nothing."""
+    text = (
+        "Contact Us Privacy Policy "
+        "Dan Lombard Managing Partner "
+        "Dan serves as a managing partner at PGF, where he leads investments in B2B software. "
+        "Prior to joining the firm in 2015, Dan was a vice president with H.I.G. Growth Partners. "
+        "Prior to entering the real world, Dan played 3 seasons of professional hockey in the US and Europe. "
+        "He and his wife Chandra have three young children."
+    )
+    life = extract_life_story(
+        "Daniel Lombard",
+        [
+            {
+                "url": "https://www.polarisgrowthfund.com/team_member/dan-lombard/",
+                "title": "Dan Lombard",
+                "kind": "bio",
+                "text": text,
+            }
+        ],
+        firm="Polaris Growth Fund",
+    )
+    assert "hockey" in life["life_events"].lower()
+    assert "wife" in life["family_background"].lower() or "children" in life["family_background"].lower()
+    assert "hockey" in life["real_story"].lower() or "children" in life["real_story"].lower()
+    assert life["hook"]

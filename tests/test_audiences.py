@@ -21,6 +21,9 @@ def test_pe_scan_cap_is_wider_than_a_2x_pull():
     assert pe_scan_cap(10) == 80
     assert pe_scan_cap(1) == 40
     assert pe_scan_cap(500) == 2000
+    assert pe_scan_cap(10, story_first=True) == 300
+    assert pe_scan_cap(1, story_first=True) == 30
+    assert pe_scan_cap(100, story_first=True) == 2000
 
 
 def test_series_ab_filters_drop_helper_keys():

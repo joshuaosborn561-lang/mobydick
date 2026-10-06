@@ -272,8 +272,44 @@ _VC_IDENTITY = re.compile(
     r"\bventure capital(?:\s+firm|\s+fund)?\b|"
     r"\bpre-seed\b|\bpreseed\b|"
     r"\bseed[- ](?:stage|fund)\b|"
-    r"\bearly[- ]stage (?:investor|fund)\b|"
-    r"\bventure fund\b",
+    r"\bearly[- ]stage (?:investor|fund|investing)\b|"
+    r"\bventure fund\b|"
+    r"\bvc fund\b",
+    re.IGNORECASE,
+)
+_FIRM_TOKEN_NOISE = {
+    "capital",
+    "partners",
+    "partner",
+    "group",
+    "equity",
+    "management",
+    "advisors",
+    "advisor",
+    "llc",
+    "lp",
+    "inc",
+    "the",
+    "and",
+    "fund",
+    "funds",
+    "company",
+    "companies",
+}
+_NOT_FIRM_SENTENCE = re.compile(
+    r"\b(?:left|leaving|departed|exited)\b.{0,48}\bventure\w*\b|"
+    r"\bportfolio compan|"
+    r"\b(?:she|he)\s+(?:is|was|joined|left|worked)\b|"
+    r"\b(?:formerly|previously|prior to joining|before joining|came from|experience in|background in|worked in|worked at)\b",
+    re.IGNORECASE,
+)
+_NOT_A_VC_CLAIM = re.compile(
+    r"\bnot\b.{0,40}\b(?:venture|seed|pre-seed|preseed|early[- ]stage)\b",
+    re.IGNORECASE,
+)
+_ADVISORY_SENTENCE = re.compile(r"\b(?:advis(?:e|es|or|ors|ory)|clients?)\b", re.IGNORECASE)
+_SELF_VOICE = re.compile(
+    r"\b(?:we are|we're|we’re|we invest|our firm|our fund|the firm|the fund|this firm)\b",
     re.IGNORECASE,
 )
 _NAMED_FIRM = re.compile(
@@ -409,56 +445,105 @@ def _same_org(left: str, right: str) -> bool:
 
 def firm_text_is_venture(text: str) -> bool:
     """The firm itself is venture. A person who left venture capital is not."""
-    if not text:
-        return False
-    cleaned = re.sub(
-        r"\b(?:left|leaving|departed|exited|after)\b.{0,48}\bventure\w*\b",
-        " ",
-        text,
+    return bool(firm_self_venture_phrase("", text, blurb=True))
+
+
+def _firm_tokens(name: str) -> list[str]:
+    return [
+        token
+        for token in re.findall(r"[A-Za-z0-9]+", name or "")
+        if len(token) >= 3 and token.lower() not in _FIRM_TOKEN_NOISE
+    ]
+
+
+def _rough_sentences(text: str) -> list[str]:
+    compact = re.sub(r"\s+", " ", text or "").strip()
+    compact = re.sub(r"\b([A-Za-z])\.", r"\1<dot>", compact)
+    compact = re.sub(
+        r"\b(?:St|Jr|Sr|Mr|Mrs|Ms|Dr|Inc|Ltd|Co|Corp)\.",
+        lambda match: match.group(0)[:-1] + "<dot>",
+        compact,
         flags=re.IGNORECASE,
     )
-    return _VC_IDENTITY.search(cleaned) is not None
+    parts = re.split(r"(?<=[.!?])\s+", compact)
+    return [part.replace("<dot>", ".").strip() for part in parts if part.strip()]
 
 
-def _looks_like_vc(name: str, description: str, domain: str) -> bool:
+def firm_self_venture_phrase(name: str, text: str, *, blurb: bool = False) -> str:
+    """Sentence where this firm calls itself a venture or seed investor.
+
+    A search snippet about another company, a portfolio company, or a person who
+    left venture capital does not count. blurb=True is the firm's own description.
+    """
+    if not text:
+        return ""
+    tokens = _firm_tokens(name)
+    for sentence in _rough_sentences(text):
+        if _NOT_FIRM_SENTENCE.search(sentence) or _NOT_A_VC_CLAIM.search(sentence):
+            continue
+        if _ADVISORY_SENTENCE.search(sentence) and not _SELF_VOICE.search(sentence):
+            continue
+        matched = _VC_IDENTITY.search(sentence) or _VC_FIRM.search(sentence)
+        if not matched:
+            continue
+        named = any(re.search(rf"\b{re.escape(token)}\b", sentence, re.IGNORECASE) for token in tokens)
+        if not (blurb or named or _SELF_VOICE.search(sentence)):
+            continue
+        return re.sub(r"\s+", " ", sentence).strip()[:180]
+    return ""
+
+
+def _venture_phrase(name: str, description: str, domain: str) -> str:
+    """Why this firm is venture, from its own description. Empty when it is not."""
     host = (domain or "").lower().strip(".")
     if host.endswith(".vc"):
-        return True
-    blob = f"{name or ''} {description or ''}"
-    if firm_text_is_venture(blob) or _VC_FIRM.search(blob):
-        return True
+        return ".vc domain"
+    phrase = firm_self_venture_phrase(name, description or "", blurb=True)
+    if phrase:
+        return phrase
     if re.search(r"\bventures?\b", name or "", re.IGNORECASE):
         if _NAMED_FIRM.search(description or ""):
-            return False
-        return True
-    return False
+            return ""
+        return "ventures in the firm name"
+    return ""
+
+
+def explain_firm(name: str, description: str, industry: str = "", domain: str = "") -> tuple[str, str]:
+    """Firm label and the phrase that triggered a non-PE label."""
+    blob = _strip_advisory(f"{name or ''} {description or ''}")
+    industry_text = (industry or "").lower()
+    form = _FORM_D_VENTURE.search(f"{description or ''} {industry or ''}")
+    if form:
+        return "venture capital", re.sub(r"\s+", " ", form.group(0)).strip()[:180]
+    broker = _BROKER.search(blob)
+    if broker:
+        return "broker-dealer", broker.group(0)[:180]
+    venture = _venture_phrase(name, description, domain)
+    if venture:
+        return "venture capital", venture
+    if re.search(r"\bholdings\b", name or "", re.IGNORECASE) and not _NAMED_FIRM.search(blob) and not _PE.search(blob):
+        return "unknown", "holdings company without a private equity description"
+    if _BUYOUT.search(blob):
+        return "buyout", ""
+    if _GROWTH.search(blob):
+        return "growth equity", ""
+    if _PE.search(blob):
+        return "private equity", ""
+    bank = _BANK.search(blob)
+    if bank or "capital markets" in industry_text:
+        return "investment bank", (bank.group(0) if bank else "capital markets")[:180]
+    risk = _RISK.search(blob)
+    if risk:
+        return "risk advisory", risk.group(0)[:180]
+    loose = _VC.search(blob)
+    if loose and firm_self_venture_phrase(name, description or "", blurb=True):
+        return "venture capital", loose.group(0)[:180]
+    return "unknown", "not described as private equity, growth equity, or buyout"
 
 
 def classify_firm(name: str, description: str, industry: str = "", domain: str = "") -> str:
     """Honest firm label. Unknown stays unknown. Never defaults to private equity."""
-    blob = _strip_advisory(f"{name or ''} {description or ''}")
-    industry_text = (industry or "").lower()
-    if _FORM_D_VENTURE.search(f"{description or ''} {industry or ''}"):
-        return "venture capital"
-    if _BROKER.search(blob):
-        return "broker-dealer"
-    if _looks_like_vc(name, description, domain):
-        return "venture capital"
-    if re.search(r"\bholdings\b", name or "", re.IGNORECASE) and not _NAMED_FIRM.search(blob) and not _PE.search(blob):
-        return "unknown"
-    if _BUYOUT.search(blob):
-        return "buyout"
-    if _GROWTH.search(blob):
-        return "growth equity"
-    if _PE.search(blob):
-        return "private equity"
-    if _BANK.search(blob) or "capital markets" in industry_text:
-        return "investment bank"
-    if _RISK.search(blob):
-        return "risk advisory"
-    if _VC.search(blob):
-        return "venture capital"
-    return "unknown"
+    return explain_firm(name, description, industry, domain)[0]
 
 
 _TITLE_WORDS = {
@@ -556,7 +641,7 @@ def assess_pe(raw: dict[str, str]) -> dict[str, str]:
         if resolved:
             last = resolved
             full = f"{first} {last}".strip()
-    firm_type = classify_firm(
+    firm_type, firm_phrase = explain_firm(
         raw.get("company_name") or "",
         raw.get("company_description") or "",
         raw.get("company_industry") or "",
@@ -580,6 +665,7 @@ def assess_pe(raw: dict[str, str]) -> dict[str, str]:
     return {
         "firm_type": firm_type,
         "dq": reason,
+        "dq_phrase": firm_phrase if reason == "not_pe_firm" else "",
         "company_domain": domain,
         "first_name": first,
         "last_name": last,

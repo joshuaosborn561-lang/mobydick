@@ -2,6 +2,7 @@ from mobydick.enrich import apply_enrichment
 from mobydick.pe_fit import (
     assess_pe,
     classify_firm,
+    firm_self_venture_phrase,
     firm_text_is_venture,
     page_disqualifies_firm,
     person_is_us,
@@ -151,6 +152,26 @@ def test_email_domain_must_match_the_firm_and_cfo_is_out():
     assert classify_firm("Seed Co", "a pre-seed fund", "") == "venture capital"
     assert firm_text_is_venture("K20 is an early-stage venture capital firm focused on software")
     assert firm_text_is_venture("She left venture capital to join the private equity firm.") is False
+    assert "venture capital" in firm_self_venture_phrase(
+        "K20 Fund",
+        "K20 is an early-stage venture capital firm focused on software.",
+    ).lower()
+    assert firm_self_venture_phrase(
+        "Northline Capital",
+        "Northline Capital is a private equity firm. A portfolio company raised a seed fund.",
+    ) == ""
+    assert firm_self_venture_phrase(
+        "Northline Capital",
+        "She left venture capital to join the private equity firm.",
+    ) == ""
+    assert firm_self_venture_phrase(
+        "Polaris Growth Fund",
+        "Some other company is an early-stage venture capital firm.",
+    ) == ""
+    assert "early-stage venture" in firm_self_venture_phrase(
+        "Polaris Growth Fund",
+        "We are an early-stage venture capital firm.",
+    ).lower()
     fixed = assess_pe(
         _pe(
             full_name="Kerry Wei",
@@ -162,6 +183,48 @@ def test_email_domain_must_match_the_firm_and_cfo_is_out():
     )
     assert fixed["dq"] == ""
     assert fixed["company_domain"] == "prysmcapital.com"
+
+
+def test_homepage_venture_claim_drops_and_a_portfolio_page_does_not(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    researched: list[str] = []
+
+    monkeypatch.setattr(
+        "mobydick.enrich.gather_person_sources",
+        lambda row: researched.append(row["full_name"]) or [],
+    )
+
+    def pe_pages(website: str, domain: str) -> dict[str, object]:
+        return {
+            "website": website,
+            "mailing_address": "",
+            "pages": [
+                {"url": f"https://{domain}/", "text": "Northline Capital is a private equity firm in Austin."},
+                {"url": f"https://{domain}/portfolio", "text": "A portfolio company raised a seed fund."},
+            ],
+        }
+
+    monkeypatch.setattr("mobydick.enrich.gather_company_pages", pe_pages)
+    kept = apply_enrichment(_pe(), "pe_partners", fetch_pages=True)
+    assert kept["dq"] == ""
+    assert kept["firm_type"] == "private equity"
+    assert researched == ["Pat Partner"]
+
+    def venture_pages(website: str, domain: str) -> dict[str, object]:
+        return {
+            "website": website,
+            "mailing_address": "",
+            "pages": [
+                {"url": f"https://{domain}/about", "text": "We are an early-stage venture capital firm."},
+            ],
+        }
+
+    monkeypatch.setattr("mobydick.enrich.gather_company_pages", venture_pages)
+    dropped = apply_enrichment(_pe(company_name="K20 Fund", company_domain="k20.com"), "pe_partners", fetch_pages=True)
+    assert dropped["dq"] == "not_pe_firm"
+    assert dropped["firm_type"] == "venture capital"
+    assert researched == ["Pat Partner"]
 
 
 def test_truncated_last_name_resolves_only_from_a_real_slug():

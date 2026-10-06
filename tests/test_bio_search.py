@@ -261,6 +261,66 @@ def test_alumni_search_runs_even_without_a_team_bio(monkeypatch):
     assert "grew up" in life["hometown"].lower() or "born" in life["hometown"].lower()
 
 
+def test_team_member_page_is_kept_when_the_site_uses_a_short_first_name(monkeypatch):
+    """Polaris publishes /team_member/dan-lombard. A Daniel Lombard row still has to keep it."""
+    _silence_network(monkeypatch)
+    queries: list[str] = []
+
+    def fake_search(query: str, **kwargs: object) -> list[dict[str, str]]:
+        queries.append(query)
+        return []
+
+    monkeypatch.setattr("mobydick.research.life.google_search", fake_search)
+    bio = (
+        "Contact Us Privacy Policy "
+        "Dan Lombard Managing Partner "
+        "Dan serves as a managing partner at PGF, where he leads investments in B2B software. "
+        "Prior to entering the real world, Dan played 3 seasons of professional hockey in the US and Europe. "
+        "He and his wife Chandra have three young children."
+    )
+    pages = {
+        "https://polarisgrowthfund.com": (
+            '<a href="/our-team/">Our Team</a>',
+            "Our Team",
+        ),
+        "https://polarisgrowthfund.com/our-team": (
+            '<a href="/team_member/dan-lombard/">Dan Lombard</a>'
+            '<a href="/team_member/bryce-youngren/">Bryce Youngren</a>',
+            "Dan Lombard Managing Partner Bryce Youngren Managing Partner",
+        ),
+        "https://polarisgrowthfund.com/team_member/dan-lombard": (bio, bio),
+    }
+
+    def fake_fetch(url: str, **kwargs: object) -> tuple[str, str]:
+        found = pages.get(url.rstrip("/"))
+        if found:
+            fake_fetch.last_status = 200
+            return found
+        fake_fetch.last_status = 404
+        return "", ""
+
+    monkeypatch.setattr("mobydick.research.life.fetch_document", fake_fetch)
+    sources = gather_person_sources(
+        {
+            "full_name": "Daniel Lombard",
+            "first_name": "Daniel",
+            "last_name": "Lombard",
+            "company_name": "Polaris Growth Fund",
+            "company_domain": "polarisgrowthfund.com",
+            "company_website": "https://polarisgrowthfund.com",
+            "_footprint_score": 0,
+        }
+    )
+    urls = [source["url"] for source in sources]
+    assert any(url.rstrip("/").endswith("/team_member/dan-lombard") for url in urls)
+    assert not any(url.rstrip("/").endswith("/team_member/bryce-youngren") for url in urls)
+    life = extract_life_story("Daniel Lombard", sources, firm="Polaris Growth Fund")
+    assert "hockey" in life["life_events"].lower()
+    assert life["hook"]
+    blob = " ".join(queries)
+    assert "alumni" in blob or "obituary" in blob or "local news" in blob
+
+
 def test_full_search_uses_about_ten_targeted_queries():
     queries = _search_queries("Ada Partner", "Northline Capital", "northline.com", full_search=True)
     assert 8 <= len(queries) <= 10
