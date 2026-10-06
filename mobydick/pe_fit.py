@@ -28,6 +28,8 @@ _NON_DEAL_TOKENS = {
     "operations",
     "talent",
     "venture",
+    "hr",
+    "people",
 }
 _NON_DEAL_PHRASES = (
     ("investor", "relations"),
@@ -39,6 +41,8 @@ _NON_DEAL_PHRASES = (
     ("head", "of", "ai"),
     ("head", "of", "technology"),
     ("head", "of", "talent"),
+    ("head", "of", "people"),
+    ("business", "partner"),
     ("information", "security"),
     ("capital", "markets"),
     ("investment", "banking"),
@@ -326,6 +330,13 @@ _RISK = re.compile(
     re.IGNORECASE,
 )
 _VC = re.compile(r"\bventure capital\b", re.IGNORECASE)
+_PE_WORD = re.compile(r"\bprivate equity\b", re.IGNORECASE)
+_VC_WORD = re.compile(r"\bventure capital\b", re.IGNORECASE)
+_LINKEDIN_CHROME = re.compile(
+    r"\blinkedin\b|skip to main content|\bjoin now\b|\bsign in\b",
+    re.IGNORECASE,
+)
+_CONFERENCE_WORD = re.compile(r"\bconference\b", re.IGNORECASE)
 
 
 def _tokens(text: str) -> list[str]:
@@ -448,6 +459,42 @@ def firm_text_is_venture(text: str) -> bool:
     return bool(firm_self_venture_phrase("", text, blurb=True))
 
 
+def _unusable_firm_sentence(sentence: str) -> bool:
+    """LinkedIn chrome, a conference menu, or a cut-off snippet is not the firm speaking."""
+    text = (sentence or "").strip()
+    if not text:
+        return True
+    if _LINKEDIN_CHROME.search(text):
+        return True
+    if len(_CONFERENCE_WORD.findall(text)) >= 2:
+        return True
+    if text.endswith("..."):
+        return True
+    if text[-1] not in ".!?":
+        words = re.findall(r"[A-Za-z]+", text)
+        if len(text) >= 50 and words and len(words[-1]) <= 4:
+            return True
+    return False
+
+
+def _both_pe_and_venture(sentence: str) -> bool:
+    return bool(_PE_WORD.search(sentence or "") and _VC_WORD.search(sentence or ""))
+
+
+def firm_text_pe_type(text: str) -> str:
+    """PE label from the firm's own usable sentences. Empty when the text does not claim it."""
+    for sentence in _rough_sentences(text or ""):
+        if _unusable_firm_sentence(sentence) or _NOT_FIRM_SENTENCE.search(sentence):
+            continue
+        if _BUYOUT.search(sentence):
+            return "buyout"
+        if _GROWTH.search(sentence):
+            return "growth equity"
+        if _both_pe_and_venture(sentence) or _PE.search(sentence):
+            return "private equity"
+    return ""
+
+
 def _firm_tokens(name: str) -> list[str]:
     return [
         token
@@ -479,6 +526,8 @@ def firm_self_venture_phrase(name: str, text: str, *, blurb: bool = False) -> st
         return ""
     tokens = _firm_tokens(name)
     for sentence in _rough_sentences(text):
+        if _unusable_firm_sentence(sentence) or _both_pe_and_venture(sentence):
+            continue
         if _NOT_FIRM_SENTENCE.search(sentence) or _NOT_A_VC_CLAIM.search(sentence):
             continue
         if _ADVISORY_SENTENCE.search(sentence) and not _SELF_VOICE.search(sentence):
@@ -501,10 +550,6 @@ def _venture_phrase(name: str, description: str, domain: str) -> str:
     phrase = firm_self_venture_phrase(name, description or "", blurb=True)
     if phrase:
         return phrase
-    if re.search(r"\bventures?\b", name or "", re.IGNORECASE):
-        if _NAMED_FIRM.search(description or ""):
-            return ""
-        return "ventures in the firm name"
     return ""
 
 
@@ -518,10 +563,23 @@ def explain_firm(name: str, description: str, industry: str = "", domain: str = 
     broker = _BROKER.search(blob)
     if broker:
         return "broker-dealer", broker.group(0)[:180]
+    for sentence in _rough_sentences(description or ""):
+        if _unusable_firm_sentence(sentence):
+            continue
+        if _both_pe_and_venture(sentence):
+            return "private equity", ""
     venture = _venture_phrase(name, description, domain)
     if venture:
         return "venture capital", venture
-    if re.search(r"\bholdings\b", name or "", re.IGNORECASE) and not _NAMED_FIRM.search(blob) and not _PE.search(blob):
+    described_as_pe = bool(
+        _PE_WORD.search(description or "") or _BUYOUT.search(description or "") or _GROWTH.search(description or "")
+    )
+    if (
+        re.search(r"\bholdings\b", name or "", re.IGNORECASE)
+        and not described_as_pe
+        and not _NAMED_FIRM.search(blob)
+        and not _PE.search(blob)
+    ):
         return "unknown", "holdings company without a private equity description"
     if _BUYOUT.search(blob):
         return "buyout", ""
@@ -538,7 +596,7 @@ def explain_firm(name: str, description: str, industry: str = "", domain: str = 
     loose = _VC.search(blob)
     if loose and firm_self_venture_phrase(name, description or "", blurb=True):
         return "venture capital", loose.group(0)[:180]
-    return "unknown", "not described as private equity, growth equity, or buyout"
+    return "unknown", ""
 
 
 def classify_firm(name: str, description: str, industry: str = "", domain: str = "") -> str:
@@ -660,7 +718,8 @@ def assess_pe(raw: dict[str, str]) -> dict[str, str]:
             reason = "not_us_person"
         if not reason and not hq_is_us(raw.get("company_hq_country") or ""):
             reason = "not_us_hq"
-        if not reason and firm_type not in KEEP_FIRM_TYPES:
+        holdings_drop = firm_phrase == "holdings company without a private equity description"
+        if not reason and firm_type not in KEEP_FIRM_TYPES and (firm_type != "unknown" or holdings_drop):
             reason = "not_pe_firm"
     return {
         "firm_type": firm_type,

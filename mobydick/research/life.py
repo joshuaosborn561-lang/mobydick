@@ -12,6 +12,7 @@ from urllib.parse import urljoin
 
 from mobydick.config import settings as default_settings
 from mobydick.research.apify import fetch_rendered_page, google_search, linkedin_posts
+from mobydick.research.blocklist import is_people_search
 from mobydick.research.extract import llm_extract
 from mobydick.research.taddy import search_episodes
 from mobydick.research.trace import drop_page, keep_fact, note, reject
@@ -128,7 +129,13 @@ _ABOUT = re.compile(
 _FIRM_VOICE = re.compile(r"\b(as a firm|our firm|the firm|the company|we are|we're|we’re)\b", re.IGNORECASE)
 _QUOTE = re.compile(r"[\"“]([^\"”]{12,280})[\"”]")
 
-_HOMETOWN = re.compile(r"\b(grew up|raised in|born in|hometown|originally from)\b", re.IGNORECASE)
+_HOMETOWN = re.compile(r"\b(grew up|raised in|born in|hometown|originally from|native of)\b", re.IGNORECASE)
+_PLACE_HOMETOWN = re.compile(
+    r"\b(grew up|raised in|hometown|originally from|native of)\b",
+    re.IGNORECASE,
+)
+_AGE = re.compile(r"\b(?:age\s+\d{1,3}|\d{1,3}\s+years old)\b", re.IGNORECASE)
+_BORN_YEAR = re.compile(r"\bborn(?:\s+in|\s+on)?\s+(?:19|20)\d{2}\b", re.IGNORECASE)
 _FAMILY = re.compile(
     r"\b(parents|father|mother|dad|mom|wife|husband|spouse|daughter|son|children|child|kids|"
     r"immigrat\w*|first-generation|first generation|"
@@ -167,6 +174,30 @@ _CAUSES = re.compile(
     r"\b(nonprofit|non-profit|foundation|charity|charitable|faith|church|synagogue|mosque|philanthrop)\b",
     re.IGNORECASE,
 )
+# Unnamed charity boards and portfolio-company boards are resume lines, not a cause.
+_RESUME_BOARD = re.compile(
+    r"\b(?:board member|on the board|board of|director of)\b.{0,80}\b(?:several|many|various|multiple|numerous)\b"
+    r"|\b(?:several|many|various|multiple|numerous)\b.{0,60}\b(?:charitable organizations|boards?|directors?)\b"
+    r"|\bcharitable organizations\b"
+    r"|\b(?:board member|director)\b.{0,80}\bportfolio companies\b",
+    re.IGNORECASE,
+)
+_ENDORSE = re.compile(r"\b(approach|book|memoir|praised|endors\w*|review)\b", re.IGNORECASE)
+_POSSESSIVE_NAME = re.compile(rf"\b({_NAME_WORD})(?:'s|’s)\b")
+_NOT_A_POSSESSIVE_NAME = {
+    "father",
+    "mother",
+    "dad",
+    "mom",
+    "family",
+    "company",
+    "firm",
+    "team",
+    "board",
+    "church",
+    "god",
+    "lord",
+}
 _ATHLETICS = re.compile(
     r"\b(varsity|athlete|letterman|lettered|ncaa|football|basketball|soccer|baseball|hockey|"
     r"lacrosse|water polo|polo|golf|rugby|crew|rowing|wrestl\w*|swimmer|swimming|"
@@ -277,14 +308,38 @@ def _clip(text: str, limit: int = 500) -> str:
     return text
 
 
+def _only_age_or_birth(text: str) -> bool:
+    """An age or a birth year, with no place or other personal fact, is not a story."""
+    if not text or not (_AGE.search(text) or _BORN_YEAR.search(text)):
+        return False
+    stripped = _BORN_YEAR.sub(" ", _AGE.sub(" ", text))
+    if _PLACE_HOMETOWN.search(stripped):
+        return False
+    if re.search(r"\bborn in\s+(?!(?:19|20)\d{2}\b)[A-Za-z]", stripped, re.IGNORECASE):
+        return False
+    return not any(
+        pattern.search(stripped) for pattern in (_FAMILY, _MILITARY, _ATHLETICS, _EVENTS, _CAUSES, _COLLEGE)
+    )
+
+
+def _resume_board(text: str) -> bool:
+    return bool(_RESUME_BOARD.search(text or ""))
+
+
+def _is_hometown_sentence(sentence: str) -> bool:
+    if not sentence or _FIRM_VOICE.search(sentence) or _only_age_or_birth(sentence):
+        return False
+    if _PLACE_HOMETOWN.search(sentence):
+        return True
+    return bool(re.search(r"\bborn in\b", sentence, re.IGNORECASE) and not _BORN_YEAR.search(sentence))
+
+
 def _is_personal_text(text: str) -> bool:
-    if not text:
+    if not text or _only_age_or_birth(text) or _resume_board(text):
         return False
-    if _HOMETOWN.search(text) and _FIRM_VOICE.search(text) and not any(
-        pattern.search(text) for pattern in (_FAMILY, _MILITARY, _ATHLETICS, _EVENTS, _CAUSES)
-    ):
+    if _endorses_other(text, "", ""):
         return False
-    if _HOMETOWN.search(text) and not _FIRM_VOICE.search(text):
+    if _is_hometown_sentence(text):
         return True
     return any(pattern.search(text) for pattern in (_FAMILY, _MILITARY, _ATHLETICS, _EVENTS, _CAUSES))
 
@@ -539,8 +594,34 @@ def _opens_with_person(text: str, first: str, last: str) -> bool:
     return _mentions_first(opening, first)
 
 
+def _endorses_other(sentence: str, first: str, last: str) -> bool:
+    """A blurb or review about someone else is not this person's fact."""
+    if not sentence or not _ENDORSE.search(sentence):
+        return False
+    for match in _POSSESSIVE_NAME.finditer(sentence):
+        token = match.group(1)
+        key = token.lower()
+        if key in _NOT_A_POSSESSIVE_NAME or key in _NOT_A_PERSON:
+            continue
+        if first and (_first_token_match(token, first) or key == first.lower()):
+            continue
+        if last and key == last.lower():
+            continue
+        if len(_compact_name(token)) >= 3:
+            return True
+    for other in _other_people(sentence, first, last):
+        if re.search(
+            rf"\b(?:praised|endors\w*|review\w*)\b.{{0,40}}\b{re.escape(other)}\b|"
+            rf"\b{re.escape(other)}\b.{{0,40}}\b(?:approach|book|memoir)\b",
+            sentence,
+            re.IGNORECASE,
+        ):
+            return True
+    return False
+
+
 def _sentence_about(sentence: str, first: str, last: str, passage_is_theirs: bool) -> bool:
-    if _blocked(sentence) or is_junk(sentence):
+    if _blocked(sentence) or is_junk(sentence) or _endorses_other(sentence, first, last):
         return False
     if _mentions(sentence, last):
         return True
@@ -570,6 +651,9 @@ def _usable_passages(full_name: str, sources: list[dict[str, str]]) -> list[dict
     first, last = _split_name(full_name)
     passages: list[dict[str, str]] = []
     for source in sources:
+        if is_people_search(source.get("url") or ""):
+            reject("people_search")
+            continue
         text = passage_for_source(source, first, last)
         if not text:
             continue
@@ -615,7 +699,7 @@ def _heuristic_from_passages(
             if not clipped:
                 continue
             slots: list[tuple[str, str]] = []
-            if _HOMETOWN.search(sentence) and not _FIRM_VOICE.search(sentence):
+            if _is_hometown_sentence(sentence):
                 slots.append(("hometown", clipped))
             if _FAMILY.search(sentence):
                 slots.append(("family_background", clipped))
@@ -625,14 +709,14 @@ def _heuristic_from_passages(
                 slots.append(("military_service", clipped))
             if _is_employer(sentence, firm):
                 slots.append(("early_jobs", clipped))
-            if _CAUSES.search(sentence):
+            if _CAUSES.search(sentence) and not _resume_board(sentence):
                 slots.append(("causes", clipped))
-            if _EVENTS.search(sentence) or _ATHLETICS.search(sentence):
+            if (_EVENTS.search(sentence) or _ATHLETICS.search(sentence)) and not _only_age_or_birth(sentence):
                 slots.append(("life_events", clipped))
             if _WHY.search(sentence) and (_FIRST_PERSON.search(sentence) or _WHY_PERSONAL.search(sentence)):
                 slots.append(("why", clipped))
             spoken = _spoken_quote(sentence) if _quote_ok(source) else ""
-            if spoken and _sentence_about(spoken, first, last, True):
+            if spoken and _sentence_about(spoken, first, last, passage_is_theirs):
                 slots.append(("quotes", _clip(spoken)))
             if not slots:
                 continue
@@ -679,13 +763,13 @@ def _cite_for(quote: str, passages: list[dict[str, str]]) -> str:
 
 def _fits_field(key: str, text: str, firm: str = "") -> bool:
     if key == "quotes":
-        return bool(_FIRST_PERSON.search(text))
+        return bool(_FIRST_PERSON.search(text) and not _endorses_other(text, "", ""))
     if key == "early_jobs":
         return _is_employer(text, firm)
     if key == "causes":
-        return bool(_CAUSES.search(text))
+        return bool(_CAUSES.search(text) and not _resume_board(text))
     if key == "hometown":
-        return bool(_HOMETOWN.search(text) and not _FIRM_VOICE.search(text))
+        return _is_hometown_sentence(text)
     if key == "college":
         return bool(_COLLEGE.search(text))
     if key == "military_service":
@@ -693,7 +777,7 @@ def _fits_field(key: str, text: str, firm: str = "") -> bool:
     if key == "family_background":
         return bool(_FAMILY.search(text))
     if key == "life_events":
-        return bool(_EVENTS.search(text) or _ATHLETICS.search(text))
+        return bool((_EVENTS.search(text) or _ATHLETICS.search(text)) and not _only_age_or_birth(text))
     if key == "why":
         return bool(_WHY.search(text))
     return False
@@ -714,7 +798,10 @@ def _llm_fill(full_name: str, firm: str, passages: list[dict[str, str]], found: 
         "Every value must be a verbatim quote copied from the sources. If you are not sure, use an empty string.\n"
         "Put each fact in exactly one field. early_jobs means prior employers and roles, not a board seat.\n"
         "causes means a nonprofit, charity, faith, or philanthropy, not a portfolio company board.\n"
+        "An unnamed charity board or a board seat at portfolio companies is not a cause.\n"
         "quotes must be first-person words the person said. Do not quote a third-person description.\n"
+        "Do not quote a blurb, review, or endorsement of someone else.\n"
+        "An age or a birth year alone is not a hometown and not a life event.\n"
         "Do not infer, summarize, or combine facts. No home addresses.\n"
         "Return JSON with keys hometown, family_background, college, military_service, early_jobs, why, causes, life_events, quotes.\n"
         "Sources:\n" + "\n\n".join(blocks)
@@ -868,6 +955,10 @@ _SKIP_FETCH_HOSTS = {
     "youtube.com",
     "youtu.be",
 }
+# Caps keep a 10-person run from spending several minutes on every candidate.
+_BIO_ATTEMPT_CAP = 8
+_SEARCH_FETCH_CAP = 6
+_RENDER_CAP = 2
 
 
 def _skip_fetch(url: str) -> bool:
@@ -950,6 +1041,9 @@ def gather_person_sources(row: dict[str, str]) -> list[dict[str, str]]:
     base = company_url(row.get("company_website") or "", domain)
 
     def store(url: str, title: str, text: str, kind: str) -> None:
+        if is_people_search(url):
+            drop_page("people_search")
+            return
         passage = passage_for_source(
             {"url": url, "title": title, "text": text, "kind": kind},
             first,
@@ -969,6 +1063,9 @@ def gather_person_sources(row: dict[str, str]) -> list[dict[str, str]]:
     def fetch_unique(url: str) -> tuple[str, str]:
         nonlocal renders
         key = (url or "").split("#")[0].rstrip("/")
+        if is_people_search(url):
+            drop_page("people_search")
+            return "", ""
         if not key or _skip_fetch(url):
             if url:
                 drop_page("skipped_host")
@@ -984,7 +1081,7 @@ def gather_person_sources(row: dict[str, str]) -> list[dict[str, str]]:
             drop_page("empty_page")
             return "", ""
         status = getattr(fetch_document, "last_status", None)
-        if not text and status in _RENDER_STATUSES and renders < 3:
+        if not text and status in _RENDER_STATUSES and renders < _RENDER_CAP:
             renders += 1
             try:
                 rendered = fetch_rendered_page(url)
@@ -1038,7 +1135,7 @@ def gather_person_sources(row: dict[str, str]) -> list[dict[str, str]]:
         enqueue(discovered + guessed, front=False)
         attempts = 0
         misses = 0
-        while queue and attempts < 14 and misses < 24 and not _has_substantive_bio(sources):
+        while queue and attempts < _BIO_ATTEMPT_CAP and misses < 24 and not _has_substantive_bio(sources):
             url = queue.pop(0)
             html, text = fetch_unique(url)
             if not text:
@@ -1145,6 +1242,9 @@ def _fetch_seed_hits(hits: list[dict[str, str]], store: Any, fetch_unique: Any) 
         kind = hit.get("kind") or "interview"
         if not url:
             continue
+        if is_people_search(url):
+            drop_page("people_search")
+            continue
         if _skip_fetch(url):
             text = f"{title} {hit.get('description') or ''}".strip()
             if text:
@@ -1178,6 +1278,8 @@ def _add_search_pages(
     queries = _search_queries(full, firm, host, full_search=full_search)
     fetched = 0
     for query in queries:
+        if fetched >= _SEARCH_FETCH_CAP:
+            break
         try:
             results = google_search(query)
         except Exception:
@@ -1185,7 +1287,7 @@ def _add_search_pages(
             results = []
         per_query = 0
         for result in results:
-            if fetched >= 12 or per_query >= 2:
+            if fetched >= _SEARCH_FETCH_CAP or per_query >= 2:
                 break
             url = result.get("url") or ""
             if not url:
@@ -1199,6 +1301,9 @@ def _add_search_pages(
             )
             kind = "interview" if personalish else "bio"
             if have_bio and kind == "bio" and host and host_key(url) == host:
+                continue
+            if is_people_search(url):
+                drop_page("people_search")
                 continue
             if _skip_fetch(url):
                 drop_page("skipped_host")
@@ -1227,6 +1332,9 @@ def public_footprint(row: dict[str, str]) -> dict[str, Any]:
         return {"score": 0, "hits": []}
 
     def add(url: str, title: str, description: str, kind: str) -> None:
+        if is_people_search(url):
+            drop_page("people_search")
+            return
         blob = f"{title} {description} {url}"
         if last and not _mentions(blob, last):
             return

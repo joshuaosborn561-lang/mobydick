@@ -261,3 +261,201 @@ def test_polaris_bio_keeps_hockey_and_family_when_the_site_says_dan():
     assert "wife" in life["family_background"].lower() or "children" in life["family_background"].lower()
     assert "hockey" in life["real_story"].lower() or "children" in life["real_story"].lower()
     assert life["hook"]
+
+
+def test_people_search_sites_and_age_only_facts_are_rejected(monkeypatch):
+    from mobydick.research.blocklist import is_people_search
+    from mobydick.research.life import gather_person_sources, public_footprint
+
+    blocked = [
+        "https://www.truepeoplesearch.com/find/robert-trainer",
+        "https://secure.information.com/robert-trainer",
+        "https://www.information.com/robert-trainer",
+        "https://www.idcrawl.com/robert-trainer",
+        "https://www.whitepages.com/name/Robert-Trainer",
+        "https://www.spokeo.com/Robert-Trainer",
+        "https://www.beenverified.com/people/robert-trainer",
+        "https://radaris.com/p/Robert/Trainer",
+        "https://www.fastpeoplesearch.com/logan-burnett",
+        "https://www.peoplefinders.com/people/tre-mischka",
+        "https://www.mylife.com/ryan-shelton",
+        "https://www.intelius.com/people/robert-trainer",
+    ]
+    assert all(is_people_search(url) for url in blocked)
+    assert is_people_search("https://www.voyagerinterests.com/team/robert-trainer") is False
+
+    broker = extract_life_story(
+        "Robert B. Trainer",
+        [
+            {
+                "url": "https://www.truepeoplesearch.com/find/robert-trainer",
+                "title": "Robert Trainer",
+                "kind": "bio",
+                "text": "Robert Trainer was born in 1930, age 95.",
+            }
+        ],
+    )
+    assert broker["hometown"] == ""
+    assert broker["life_events"] == ""
+    assert broker["hook"] == ""
+    assert broker["real_story"] == ""
+
+    roster = extract_life_story(
+        "Logan Burnett",
+        [
+            {
+                "url": "https://www.fastpeoplesearch.com/logan-burnett",
+                "title": "Logan Burnett",
+                "kind": "bio",
+                "text": "Logan Burnett, 2025 VMI football roster. Wide receiver.",
+            }
+        ],
+    )
+    assert roster["life_events"] == ""
+    assert "VMI" not in roster["hook"]
+    assert roster["real_story"] == ""
+
+    trainer = extract_life_story(
+        "Robert Trainer",
+        [
+            {
+                "url": "https://voyagerinterests.com/team/robert-trainer",
+                "title": "Robert Trainer",
+                "kind": "bio",
+                "text": "Robert Trainer Partner. Robert Trainer was born in 1930, age 95.",
+            }
+        ],
+    )
+    assert trainer["hometown"] == ""
+    assert "1930" not in trainer["life_events"]
+    assert "1930" not in trainer["hook"]
+    assert "1930" not in trainer["real_story"]
+
+    shelton_age = extract_life_story(
+        "Ryan Shelton",
+        [
+            {
+                "url": "https://rockhillcap.com/team/ryan-shelton",
+                "title": "Ryan Shelton",
+                "kind": "bio",
+                "text": "Ryan Shelton Managing Director. Ryan Shelton is age 21 in State College, PA.",
+            }
+        ],
+    )
+    assert shelton_age["hometown"] == ""
+    assert "State College" not in shelton_age["hook"]
+    assert "State College" not in shelton_age["real_story"]
+
+    mischka = extract_life_story(
+        "Tre Mischka",
+        [
+            {
+                "url": "https://supplychainequity.com/team/tre-mischka",
+                "title": "Tre Mischka",
+                "kind": "bio",
+                "text": "Tre Mischka Principal. Tre Mischka is 65 years old.",
+            }
+        ],
+    )
+    assert mischka["life_events"] == ""
+    assert mischka["hometown"] == ""
+    assert "65" not in mischka["hook"]
+    assert "65" not in mischka["real_story"]
+
+    still_hometown = extract_life_story(
+        "Jane Okonkwo",
+        [
+            {
+                "url": "https://example.com/jane",
+                "title": "Jane Okonkwo",
+                "kind": "bio",
+                "text": "Jane Okonkwo grew up in Dayton and is 40 years old.",
+            }
+        ],
+    )
+    assert "Dayton" in still_hometown["hometown"]
+    assert "Dayton" in still_hometown["hook"]
+
+    monkeypatch.setattr("mobydick.research.life.talks_with_transcripts", lambda *args, **kwargs: [])
+    monkeypatch.setattr("mobydick.research.life.search_episodes", lambda *args, **kwargs: [])
+    monkeypatch.setattr("mobydick.research.life.linkedin_posts", lambda *args, **kwargs: [])
+    monkeypatch.setattr("mobydick.research.life.search_videos", lambda *args, **kwargs: [])
+
+    def fake_fetch(url: str, **kwargs: object) -> tuple[str, str]:
+        fake_fetch.last_status = 404
+        return "", ""
+
+    def fake_search(query: str, **kwargs: object) -> list[dict[str, str]]:
+        return [
+            {
+                "url": "https://www.truepeoplesearch.com/find/robert-trainer",
+                "title": "Robert Trainer",
+                "description": "Robert Trainer was born in 1930, age 95.",
+            }
+        ]
+
+    monkeypatch.setattr("mobydick.research.life.fetch_document", fake_fetch)
+    monkeypatch.setattr("mobydick.research.life.google_search", fake_search)
+    row = {
+        "full_name": "Robert Trainer",
+        "first_name": "Robert",
+        "last_name": "Trainer",
+        "company_name": "Voyager Interests",
+        "company_domain": "voyagerinterests.com",
+        "company_website": "https://voyagerinterests.com",
+    }
+    sources = gather_person_sources(row)
+    assert all("truepeoplesearch" not in source["url"] for source in sources)
+    assert all("1930" not in (source.get("text") or "") for source in sources)
+    footprint = public_footprint(row)
+    assert footprint["hits"] == []
+    assert footprint["score"] == 0
+
+
+def test_another_persons_blurb_and_a_charity_board_are_not_the_story():
+    guhan = extract_life_story(
+        "Guhan Swaminathan",
+        [
+            {
+                "url": "https://virgocapital.com/team/guhan-swaminathan",
+                "title": "Guhan Swaminathan",
+                "kind": "interview",
+                "text": (
+                    "Guhan Swaminathan Managing Director. "
+                    "Guhan Swaminathan grew up in Austin, Texas. "
+                    'A reviewer wrote "I admire Anand\'s approach to building companies."'
+                ),
+            }
+        ],
+        firm="Virgo Capital",
+    )
+    assert "Austin" in guhan["hometown"]
+    assert "Anand" not in guhan["quotes"]
+    assert "Anand" not in guhan["hook"]
+    assert "Anand" not in guhan["real_story"]
+    assert "Austin" in guhan["hook"]
+
+    shelton = extract_life_story(
+        "Ryan Shelton",
+        [
+            {
+                "url": "https://rockhillcap.com/team/ryan-shelton",
+                "title": "Ryan Shelton",
+                "kind": "bio",
+                "text": (
+                    "Ryan Shelton Managing Director. "
+                    "Ryan Shelton grew up in Houston, Texas. "
+                    "Ryan Shelton has served as a Director of several charitable organizations "
+                    "and is a board member of many of Rock Hill's portfolio companies."
+                ),
+            }
+        ],
+        firm="Rock Hill Capital",
+    )
+    assert "Houston" in shelton["hometown"]
+    assert shelton["causes"] == ""
+    assert "charitable" not in shelton["hook"].lower()
+    assert "portfolio" not in shelton["hook"].lower()
+    assert "charitable" not in shelton["real_story"].lower()
+    assert "portfolio" not in shelton["real_story"].lower()
+    assert "Houston" in shelton["hook"]

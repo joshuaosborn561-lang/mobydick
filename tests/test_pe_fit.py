@@ -48,6 +48,9 @@ def test_titles_match_words_not_substrings():
     assert title_reason("Managing Director, Operations") == "non_deal_role"
     assert title_reason("Partner, Talent") == "non_deal_role"
     assert title_reason("Operating Partner") == ""
+    assert title_reason("Partner") == ""
+    assert title_reason("Manager, HR Business Partner") == "non_deal_role"
+    assert title_reason("Head of People") == "non_deal_role"
     assert title_reason("Independent Sponsor") == "not_partner_grade"
 
 
@@ -105,7 +108,7 @@ def test_enrichment_does_not_invent_private_equity_or_a_life_story(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     row = apply_enrichment(_pe(company_description="", company_industry=""), "pe_partners", fetch_pages=False)
     assert row["firm_type"] == "unknown"
-    assert row["dq"] == "not_pe_firm"
+    assert row["dq"] == ""
     assert row["confidence"] == "low"
     assert row["hometown_or_from"] == ""
     assert row["real_story"] == ""
@@ -141,7 +144,8 @@ def test_email_domain_must_match_the_firm_and_cfo_is_out():
     )
     assert ted["dq"] in {"email_domain_mismatch", "not_pe_firm"}
     assert classify_firm("All Aboard Fund", "growth equity firm", "", "allaboard.vc") == "venture capital"
-    assert classify_firm("2.0 Ventures", "focused on buyouts", "") == "venture capital"
+    assert classify_firm("2.0 Ventures", "focused on buyouts", "") == "buyout"
+    assert classify_firm("Vora Ventures", "a private equity firm", "") == "private equity"
     assert title_reason("Chief Financial Officer/Operating Partner") == "non_deal_role"
     assert classify_firm("Allele Capital", "private equity firm and FINRA Series 7 broker-dealer", "") == "broker-dealer"
     assert classify_firm("Ampersand Holdings", "a diversified holdings company", "") == "unknown"
@@ -249,3 +253,51 @@ def test_truncated_last_name_resolves_only_from_a_real_slug():
     )
     assert stuck["unresolved_name"] == "yes"
     assert stuck["dq"] == ""
+
+
+def test_both_private_equity_and_venture_stays_and_weak_text_does_not_drop():
+    celerity = (
+        "Celerity Partners is a private equity and venture capital firm specializing in "
+        "investments in late venture, growth capital, acquisitions."
+    )
+    exalt = "Exalt Capital Partners specializes in Private Equity and Venture Capital investing."
+    mavdon = (
+        "Mavdon Capital specializes in commercial and multifamily real estate investments, "
+        "venture capital, and private equity."
+    )
+    assert classify_firm("Celerity Partners", celerity) == "private equity"
+    assert classify_firm("Exalt Capital Partners", exalt) == "private equity"
+    assert classify_firm("Mavdon Capital", mavdon) == "private equity"
+    assert assess_pe(_pe(company_name="Celerity Partners", company_description=celerity))["dq"] == ""
+    assert firm_self_venture_phrase("Celerity Partners", celerity, blurb=True) == ""
+    assert firm_text_is_venture(celerity) is False
+
+    chrome = (
+        "Navigation Capital Partners | LinkedIn Skip to main content LinkedIn Top Content "
+        "People Learning Jobs Games Sign in Join now Navigation Capital Partners Venture Capital"
+    )
+    menu = (
+        "Top Family Office Conference Hedge Fund Conference Private Equity Conference "
+        "VC Conference Venture Capital Conference"
+    )
+    truncated = (
+        "Invergarry Holdings was founded by Townes Duncan and Charlie Gerber in 2018 to acquire "
+        "attractively priced secondary and primary private equity and venture capi"
+    )
+    assert firm_self_venture_phrase("Navigation Capital Partners", chrome, blurb=True) == ""
+    assert firm_self_venture_phrase("Open Prairie", menu, blurb=True) == ""
+    assert firm_self_venture_phrase("Invergarry Holdings", truncated, blurb=True) == ""
+    assert classify_firm("Navigation Capital Partners", chrome) == "unknown"
+    assert classify_firm("Open Prairie", menu) == "unknown"
+    assert classify_firm("Invergarry Holdings", truncated) == "unknown"
+    assert assess_pe(_pe(company_name="Navigation Capital Partners", company_description=chrome))["dq"] == ""
+    assert assess_pe(_pe(company_name="Open Prairie", company_description=menu))["dq"] == ""
+    assert assess_pe(_pe(company_name="Invergarry Holdings", company_description=truncated))["dq"] == ""
+    blank = assess_pe(_pe(company_description="", company_industry=""))
+    assert blank["firm_type"] == "unknown"
+    assert blank["dq"] == ""
+    holdings = assess_pe(
+        _pe(company_name="Ampersand Holdings", company_description="a diversified holdings company")
+    )
+    assert holdings["firm_type"] == "unknown"
+    assert holdings["dq"] == "not_pe_firm"
