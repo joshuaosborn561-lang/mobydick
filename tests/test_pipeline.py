@@ -237,7 +237,7 @@ def test_pe_keeps_paging_until_the_requested_keepers(tmp_path, monkeypatch):
                 return page
             return [_pe_row("Bea Keeper", "bea.com"), _pe_row("Cam Keeper", "cam.com")]
 
-    monkeypatch.setattr("mobydick.pipeline.pe_scan_cap", lambda wanted: 150)
+    monkeypatch.setattr("mobydick.pipeline.pe_scan_cap", lambda wanted, story_first=False: 150)
     result = build_enriched_list(
         "pe_partners",
         3,
@@ -292,7 +292,7 @@ def test_story_first_skips_resume_only_rows_and_ranks_personal_facts(tmp_path, m
     monkeypatch.setattr("mobydick.enrich.gather_company_pages", fake_pages)
     monkeypatch.setattr("mobydick.enrich.gather_person_sources", fake_sources)
     monkeypatch.setattr("mobydick.research.life.public_footprint", fake_footprint)
-    monkeypatch.setattr("mobydick.pipeline.pe_scan_cap", lambda wanted: 150)
+    monkeypatch.setattr("mobydick.pipeline.pe_scan_cap", lambda wanted, story_first=False: 150)
 
     class FakeLeads:
         def search(self, filters: dict, limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
@@ -324,8 +324,11 @@ def test_story_first_skips_resume_only_rows_and_ranks_personal_facts(tmp_path, m
     assert result["shortfall"] == 0
     assert result["dq_reasons"].get("no_personal_story", 0) >= 1
     assert researched[0] == "Bea Keeper"
+    assert "Ada Keeper" in researched
     assert [sample["full_name"] for sample in result["samples"]] == ["Bea Keeper", "Dee Keeper"]
-    assert "ada.com" in store.exclude_domains("pe_partners")
+    assert "ada.com" not in store.exclude_domains("pe_partners")
+    assert "bea.com" in store.exclude_domains("pe_partners")
+    assert result["research"]["person_drops"].get("no_personal_story", 0) >= 1
 
     class OnlyResume:
         def search(self, filters: dict, limit: int = 100, offset: int = 0) -> list[dict[str, str]]:

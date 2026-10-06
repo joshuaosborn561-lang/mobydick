@@ -130,7 +130,8 @@ _QUOTE = re.compile(r"[\"“]([^\"”]{12,280})[\"”]")
 
 _HOMETOWN = re.compile(r"\b(grew up|raised in|born in|hometown|originally from)\b", re.IGNORECASE)
 _FAMILY = re.compile(
-    r"\b(parents|father|mother|dad|mom|immigrat\w*|first-generation|first generation|"
+    r"\b(parents|father|mother|dad|mom|wife|husband|spouse|daughter|son|children|child|kids|"
+    r"immigrat\w*|first-generation|first generation|"
     r"sibling|brother|sister|family business)\b",
     re.IGNORECASE,
 )
@@ -385,16 +386,40 @@ def is_junk(text: str) -> bool:
     return len(_other_people(text, "", "")) >= 3
 
 
+def _compact_name(value: str) -> str:
+    return re.sub(r"[^a-z]", "", (value or "").lower())
+
+
+def _first_token_match(token: str, first: str) -> bool:
+    """Dan matches Daniel. A title word such as Partner does not."""
+    left = _compact_name(token)
+    right = _compact_name(first)
+    if len(left) < 3 or len(right) < 3:
+        return False
+    if left in _NOT_A_PERSON or right in _NOT_A_PERSON:
+        return False
+    short, long = (left, right) if len(left) <= len(right) else (right, left)
+    return long.startswith(short) and len(long) - len(short) <= 6
+
+
+def _mentions_first(text: str, first: str) -> bool:
+    if _mentions(text, first):
+        return True
+    return any(_first_token_match(token, first) for token in re.findall(r"[A-Za-z]{3,}", text or ""))
+
+
 def _heading_is_person(heading: str, first: str, last: str) -> bool:
     tokens = [re.sub(r"[^A-Za-z\u00C0-\u024F'’-]", "", token) for token in heading.split()]
     tokens = [token for token in tokens if token]
     if not tokens or not last:
         return False
-    if tokens[-1].lower() != last.lower():
+    last_key = _compact_name(last)
+    heading_key = _compact_name("".join(tokens))
+    if tokens[-1].lower() != last.lower() and (len(last_key) < 3 or last_key not in heading_key):
         return False
     if not first:
         return True
-    return tokens[0].lower() == first.lower()
+    return tokens[0].lower() == first.lower() or _first_token_match(tokens[0], first)
 
 
 def _unique_last_name(first: str, text: str) -> str:
@@ -507,9 +532,11 @@ def _opens_with_person(text: str, first: str, last: str) -> bool:
     opening = (text or "")[:160]
     if last and re.search(rf"\b(?:Mr|Ms|Mrs|Dr)\.?\s+{re.escape(last)}\b", opening, re.IGNORECASE):
         return True
-    if not first or not last:
+    if not last or not _mentions(opening, last):
         return False
-    return _mentions(opening, first) and _mentions(opening, last)
+    if not first:
+        return True
+    return _mentions_first(opening, first)
 
 
 def _sentence_about(sentence: str, first: str, last: str, passage_is_theirs: bool) -> bool:
@@ -517,7 +544,7 @@ def _sentence_about(sentence: str, first: str, last: str, passage_is_theirs: boo
         return False
     if _mentions(sentence, last):
         return True
-    if passage_is_theirs and first and _mentions(sentence, first):
+    if passage_is_theirs and first and _mentions_first(sentence, first):
         return True
     if passage_is_theirs and _ABOUT.search(sentence) and not _other_people(sentence, first, last):
         return True
@@ -600,7 +627,7 @@ def _heuristic_from_passages(
                 slots.append(("early_jobs", clipped))
             if _CAUSES.search(sentence):
                 slots.append(("causes", clipped))
-            if _EVENTS.search(sentence):
+            if _EVENTS.search(sentence) or _ATHLETICS.search(sentence):
                 slots.append(("life_events", clipped))
             if _WHY.search(sentence) and (_FIRST_PERSON.search(sentence) or _WHY_PERSONAL.search(sentence)):
                 slots.append(("why", clipped))
@@ -882,7 +909,14 @@ def _bio_paths(full: str, first: str, last: str) -> list[str]:
         "/our-team.php",
     ]
     for slug in _name_slugs(full, first, last):
-        paths.extend((f"/team/{slug}", f"/people/{slug}", f"/leadership/{slug}"))
+        paths.extend(
+            (
+                f"/team/{slug}",
+                f"/people/{slug}",
+                f"/leadership/{slug}",
+                f"/team_member/{slug}",
+            )
+        )
     return paths
 
 
@@ -984,11 +1018,16 @@ def gather_person_sources(row: dict[str, str]) -> list[dict[str, str]]:
                 queue.append(url)
 
     def person_link(url: str) -> bool:
-        if not last or not re.search(rf"\b{re.escape(last)}\b", url, re.IGNORECASE):
+        """Same-site bio URLs. A short first name in the slug still counts."""
+        last_key = _compact_name(last)
+        if len(last_key) < 3 or last_key not in _compact_name(url):
             return False
-        if first and not re.search(rf"\b{re.escape(first)}\b", url, re.IGNORECASE):
-            return False
-        return True
+        if not first:
+            return True
+        tokens = re.findall(r"[A-Za-z]{3,}", url or "")
+        if any(_first_token_match(token, first) for token in tokens):
+            return True
+        return bool(re.search(r"team|people|bio|member|leadership", url or "", re.IGNORECASE))
 
     if base and last:
         home_html, _home_text = fetch_unique(base)
@@ -998,12 +1037,18 @@ def gather_person_sources(row: dict[str, str]) -> list[dict[str, str]]:
         queued: set[str] = set()
         enqueue(discovered + guessed, front=False)
         attempts = 0
-        while queue and attempts < 14 and not _has_substantive_bio(sources):
+        misses = 0
+        while queue and attempts < 14 and misses < 24 and not _has_substantive_bio(sources):
             url = queue.pop(0)
             html, text = fetch_unique(url)
-            attempts += 1
             if not text:
+                # Guessed slugs 404 often. They must not use up the budget for the real bio.
+                if getattr(fetch_document, "last_status", None) == 404:
+                    misses += 1
+                else:
+                    attempts += 1
                 continue
+            attempts += 1
             store(url, f"{firm} bio", text, "bio")
             extras = candidate_bio_urls(html, url, first, last)
             named = [extra for extra in extras if person_link(extra)]
@@ -1011,9 +1056,8 @@ def gather_person_sources(row: dict[str, str]) -> list[dict[str, str]]:
             enqueue(named, front=True)
             enqueue(rest, front=False)
 
+    # Footprint score only orders the queue. It never turns off the bio crawl or the deep queries.
     full_search = True
-    if "_footprint_score" in row:
-        full_search = int(row.get("_footprint_score") or 0) > 0
     _fetch_seed_hits(list(row.get("_footprint_hits") or []), store, fetch_unique)
     _add_search_pages(
         full,
@@ -1229,17 +1273,3 @@ def public_footprint(row: dict[str, str]) -> dict[str, Any]:
     return {"score": len(hits), "hits": hits[:6]}
 
 
-def firm_venture_snippets(firm: str) -> str:
-    """Search snippets that describe the firm, not a person's bio."""
-    firm = (firm or "").strip()
-    if not firm:
-        return ""
-    try:
-        results = google_search(
-            f'"{firm}" ("venture capital" OR "early-stage" OR pre-seed OR "seed fund" OR "seed-stage")',
-            limit=4,
-        )
-    except Exception:
-        logger.exception("firm venture search failed")
-        return ""
-    return " ".join(f"{item.get('title') or ''} {item.get('description') or ''}" for item in results)[:2000]

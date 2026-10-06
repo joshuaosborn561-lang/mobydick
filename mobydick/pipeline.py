@@ -137,7 +137,14 @@ def build_enriched_list(
             if verdict.get("last_name"):
                 row["last_name"] = verdict["last_name"]
             if verdict["dq"]:
-                early_dq.append({"dq": verdict["dq"], "firm_type": verdict["firm_type"]})
+                early_dq.append(
+                    {
+                        "dq": verdict["dq"],
+                        "firm_type": verdict["firm_type"],
+                        "firm": row.get("company_name") or "",
+                        "phrase": verdict.get("dq_phrase") or "",
+                    }
+                )
                 continue
             passing.append(row)
         fresh = passing
@@ -151,11 +158,16 @@ def build_enriched_list(
         from mobydick.research.trace import tracing
 
         with tracing() as trace:
+            for item in early_dq:
+                from mobydick.research.trace import drop_person, note_not_pe
+
+                drop_person(item.get("dq") or "")
+                if item.get("dq") == "not_pe_firm":
+                    note_not_pe(item.get("firm") or "", item.get("phrase") or item.get("firm_type") or "")
             enriched = enrich_rows(fresh, name, fetch_pages=fetch_pages and enrich, progress=progress)
+            _apply_story_gate(enriched, story_first=story_first and fetch_pages and enrich)
             research = trace.as_dict()
         logger.info("pe research %s", research)
-        _apply_story_gate(enriched, story_first=story_first and fetch_pages and enrich)
-        _exclude_blank_stories(store, enriched)
     else:
         enriched = enrich_rows(fresh, name, fetch_pages=fetch_pages and enrich, progress=progress)
     payload = _delivery_payload(
@@ -188,6 +200,7 @@ def _apply_pe_verdict(row: dict[str, str], verdict: dict[str, str]) -> str:
 
 
 def _score_footprints(pending: list[dict[str, str]], limit: int) -> None:
+    """Order the queue. A missing footprint does not remove a candidate."""
     from mobydick.research.life import public_footprint
 
     scored = 0
@@ -210,22 +223,15 @@ def _apply_story_gate(rows: list[dict[str, str]], *, story_first: bool) -> None:
     if not story_first:
         return
     from mobydick.research.life import cited_personal_facts
+    from mobydick.research.trace import drop_person
 
     for row in rows:
+        no_pages = row.pop("_no_pages_kept", "")
         if row.get("dq"):
             continue
         if not cited_personal_facts(row):
             row["dq"] = "no_personal_story"
-
-
-def _exclude_blank_stories(store: Store, rows: list[dict[str, str]]) -> None:
-    domains = [
-        normalize_domain(row.get("company_domain"))
-        for row in rows
-        if row.get("dq") == "no_personal_story" and normalize_domain(row.get("company_domain"))
-    ]
-    if domains:
-        store.exclude_add(domains, "pe_partners")
+            drop_person("no_pages_kept" if no_pages and not row.get("sources") else "no_personal_story")
 
 
 def _build_pe_until_full(
@@ -243,7 +249,7 @@ def _build_pe_until_full(
     from mobydick.pe_fit import assess_pe
     from mobydick.research.trace import tracing
 
-    cap = pe_scan_cap(wanted)
+    cap = pe_scan_cap(wanted, story_first=story_first)
     scanned: list[dict[str, str]] = []
     enriched: list[dict[str, str]] = []
     keepers: list[dict[str, str]] = []
@@ -279,7 +285,19 @@ def _build_pe_until_full(
                     verdict = assess_pe(row)
                     reason = _apply_pe_verdict(row, verdict)
                     if reason:
-                        early_dq.append({"dq": reason, "firm_type": verdict.get("firm_type") or ""})
+                        early_dq.append(
+                            {
+                                "dq": reason,
+                                "firm_type": verdict.get("firm_type") or "",
+                                "firm": row.get("company_name") or "",
+                                "phrase": verdict.get("dq_phrase") or "",
+                            }
+                        )
+                        from mobydick.research.trace import drop_person, note_not_pe
+
+                        drop_person(reason)
+                        if reason == "not_pe_firm":
+                            note_not_pe(row.get("company_name") or "", verdict.get("dq_phrase") or "")
                         continue
                     if domain:
                         kept_domains.add(domain)
@@ -313,7 +331,6 @@ def _build_pe_until_full(
                     continue
                 keepers.append(row)
         research = trace.as_dict()
-    _exclude_blank_stories(store, enriched)
     logger.info("pe research %s", research)
     unique_domains = {
         domain
