@@ -66,6 +66,7 @@ def fetch_document(
     """Return (html, visible text). Counts the attempt. Empty when the fetch fails."""
     from mobydick.research.trace import note
 
+    fetch_document.last_status = 0
     if not url:
         return "", ""
     note("pages_fetched")
@@ -78,7 +79,9 @@ def fetch_document(
             allow_redirects=True,
         )
     except requests.RequestException:
+        fetch_document.last_status = 0
         return "", ""
+    fetch_document.last_status = resp.status_code
     if resp.status_code >= 400:
         return "", ""
     html = resp.text or ""

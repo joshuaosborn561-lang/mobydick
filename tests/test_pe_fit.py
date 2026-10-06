@@ -1,5 +1,12 @@
 from mobydick.enrich import apply_enrichment
-from mobydick.pe_fit import assess_pe, classify_firm, page_disqualifies_firm, person_is_us, title_reason
+from mobydick.pe_fit import (
+    assess_pe,
+    classify_firm,
+    firm_text_is_venture,
+    page_disqualifies_firm,
+    person_is_us,
+    title_reason,
+)
 
 
 def _pe(**overrides):
@@ -35,6 +42,11 @@ def test_titles_match_words_not_substrings():
     assert title_reason("Head of PSG Europe") == "non_us_role"
     assert title_reason("Partner, Head of Europe") == "non_us_role"
     assert title_reason("Associate") == "junior_title"
+    assert title_reason("Venture Partner") == "non_deal_role"
+    assert title_reason("Managing Director – Finance / Data & Analytics") == "non_deal_role"
+    assert title_reason("Managing Director, Operations") == "non_deal_role"
+    assert title_reason("Partner, Talent") == "non_deal_role"
+    assert title_reason("Operating Partner") == ""
     assert title_reason("Independent Sponsor") == "not_partner_grade"
 
 
@@ -135,6 +147,10 @@ def test_email_domain_must_match_the_firm_and_cfo_is_out():
     assert classify_firm("Drawdown Fund", "SEC Form D lists the offering as venture", "") == "venture capital"
     assert page_disqualifies_firm("Form D filing: venture fund") == "venture capital"
     assert page_disqualifies_firm("She left venture capital to join the private equity firm.") == ""
+    assert classify_firm("K20 Fund", "an early-stage venture capital firm", "") == "venture capital"
+    assert classify_firm("Seed Co", "a pre-seed fund", "") == "venture capital"
+    assert firm_text_is_venture("K20 is an early-stage venture capital firm focused on software")
+    assert firm_text_is_venture("She left venture capital to join the private equity firm.") is False
     fixed = assess_pe(
         _pe(
             full_name="Kerry Wei",

@@ -22,6 +22,12 @@ _NON_DEAL_TOKENS = {
     "compliance",
     "ir",
     "cfo",
+    "finance",
+    "data",
+    "analytics",
+    "operations",
+    "talent",
+    "venture",
 }
 _NON_DEAL_PHRASES = (
     ("investor", "relations"),
@@ -261,6 +267,15 @@ _BROKER = re.compile(
     re.IGNORECASE,
 )
 _VC_FIRM = re.compile(r"\b(?:venture capital|venture fund|vc fund)\b", re.IGNORECASE)
+_VC_IDENTITY = re.compile(
+    r"\bearly[- ]stage venture\b|"
+    r"\bventure capital(?:\s+firm|\s+fund)?\b|"
+    r"\bpre-seed\b|\bpreseed\b|"
+    r"\bseed[- ](?:stage|fund)\b|"
+    r"\bearly[- ]stage (?:investor|fund)\b|"
+    r"\bventure fund\b",
+    re.IGNORECASE,
+)
 _NAMED_FIRM = re.compile(
     r"\b(?:private equity|buyout|growth equity)\s+(?:firm|fund|funds|partnership)\b",
     re.IGNORECASE,
@@ -392,12 +407,25 @@ def _same_org(left: str, right: str) -> bool:
     return left == right or left.endswith("." + right) or right.endswith("." + left)
 
 
+def firm_text_is_venture(text: str) -> bool:
+    """The firm itself is venture. A person who left venture capital is not."""
+    if not text:
+        return False
+    cleaned = re.sub(
+        r"\b(?:left|leaving|departed|exited|after)\b.{0,48}\bventure\w*\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return _VC_IDENTITY.search(cleaned) is not None
+
+
 def _looks_like_vc(name: str, description: str, domain: str) -> bool:
     host = (domain or "").lower().strip(".")
     if host.endswith(".vc"):
         return True
     blob = f"{name or ''} {description or ''}"
-    if _VC_FIRM.search(blob):
+    if firm_text_is_venture(blob) or _VC_FIRM.search(blob):
         return True
     if re.search(r"\bventures?\b", name or "", re.IGNORECASE):
         if _NAMED_FIRM.search(description or ""):

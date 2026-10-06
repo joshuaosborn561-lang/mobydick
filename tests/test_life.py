@@ -1,5 +1,5 @@
 from mobydick.enrich import apply_enrichment
-from mobydick.research.life import extract_life_story
+from mobydick.research.life import _sentences, extract_life_story
 from mobydick.research.web import html_to_text
 
 
@@ -181,3 +181,55 @@ def test_resume_facts_alone_do_not_make_a_high_confidence_story():
     assert life["hook"] == ""
     assert life["real_story"] == ""
     assert life["confidence"] == "low"
+
+
+def test_sentences_keep_abbreviations_and_drop_cutoffs():
+    text = (
+        "He studied at Washington University in St. Louis. "
+        "Prior to joining Invision, Jon was a principal at BancBoston Capital."
+    )
+    sentences = _sentences(text)
+    assert any("St. Louis" in sentence for sentence in sentences)
+    assert not any(sentence.endswith("St.") for sentence in sentences)
+    assert _sentences("Prior to joining Invision, Jon was a") == []
+    assert _sentences("Washington University in St.") == []
+
+
+def test_athletics_count_even_when_the_sentence_names_a_college():
+    life = extract_life_story(
+        "Cody Shirk",
+        [
+            {
+                "url": "https://example.com/cody",
+                "title": "Team",
+                "kind": "bio",
+                "text": (
+                    "Cody Shirk Partner Cody was a four-year NCAA water polo player "
+                    "at the University of California."
+                ),
+            }
+        ],
+    )
+    assert "water polo" in life["life_events"]
+    assert "water polo" in life["real_story"]
+    assert "water polo" in life["hook"]
+
+
+def test_the_current_firm_is_not_an_early_job():
+    life = extract_life_story(
+        "Jon Hale",
+        [
+            {
+                "url": "https://invision.example/team",
+                "title": "Team",
+                "kind": "bio",
+                "text": (
+                    "Jon Hale Managing Director Jon was a Managing Director at Invision Capital. "
+                    "Prior to joining Invision, Jon was a principal at BancBoston Capital."
+                ),
+            }
+        ],
+        firm="Invision Capital",
+    )
+    assert "BancBoston" in life["early_jobs"]
+    assert "Managing Director at Invision" not in life["early_jobs"]

@@ -67,6 +67,7 @@ def build_enriched_list(
     overfetch: float = 2.0,
     enrich: bool = True,
     fetch_pages: bool = True,
+    story_first: bool | None = None,
     store: Store | None = None,
     getleads: GetLeadsClient | None = None,
     raw_rows: list[dict[str, str]] | None = None,
@@ -74,6 +75,9 @@ def build_enriched_list(
 ) -> dict[str, Any]:
     name = normalize_audience(audience)
     wanted = max(1, int(count))
+    if story_first is None:
+        story_first = name == "pe_partners"
+    story_first = bool(story_first) and name == "pe_partners"
     store = store or Store()
     excluded = store.exclude_domains(name)
     merged_filters = default_filters(
@@ -99,6 +103,7 @@ def build_enriched_list(
             filters=merged_filters,
             client=client,
             fetch_pages=fetch_pages and enrich,
+            story_first=story_first,
             progress=progress,
         )
 
@@ -149,6 +154,8 @@ def build_enriched_list(
             enriched = enrich_rows(fresh, name, fetch_pages=fetch_pages and enrich, progress=progress)
             research = trace.as_dict()
         logger.info("pe research %s", research)
+        _apply_story_gate(enriched, story_first=story_first and fetch_pages and enrich)
+        _exclude_blank_stories(store, enriched)
     else:
         enriched = enrich_rows(fresh, name, fetch_pages=fetch_pages and enrich, progress=progress)
     payload = _delivery_payload(
@@ -180,6 +187,47 @@ def _apply_pe_verdict(row: dict[str, str], verdict: dict[str, str]) -> str:
     return verdict.get("dq") or ""
 
 
+def _score_footprints(pending: list[dict[str, str]], limit: int) -> None:
+    from mobydick.research.life import public_footprint
+
+    scored = 0
+    for row in pending:
+        if "_footprint_score" in row:
+            continue
+        if scored >= limit:
+            break
+        try:
+            footprint = public_footprint(row)
+        except Exception:
+            logger.exception("footprint failed")
+            footprint = {"score": 0, "hits": []}
+        row["_footprint_score"] = int(footprint.get("score") or 0)
+        row["_footprint_hits"] = list(footprint.get("hits") or [])[:6]
+        scored += 1
+
+
+def _apply_story_gate(rows: list[dict[str, str]], *, story_first: bool) -> None:
+    if not story_first:
+        return
+    from mobydick.research.life import cited_personal_facts
+
+    for row in rows:
+        if row.get("dq"):
+            continue
+        if not cited_personal_facts(row):
+            row["dq"] = "no_personal_story"
+
+
+def _exclude_blank_stories(store: Store, rows: list[dict[str, str]]) -> None:
+    domains = [
+        normalize_domain(row.get("company_domain"))
+        for row in rows
+        if row.get("dq") == "no_personal_story" and normalize_domain(row.get("company_domain"))
+    ]
+    if domains:
+        store.exclude_add(domains, "pe_partners")
+
+
 def _build_pe_until_full(
     *,
     wanted: int,
@@ -188,6 +236,7 @@ def _build_pe_until_full(
     filters: dict[str, Any],
     client: GetLeadsClient,
     fetch_pages: bool,
+    story_first: bool,
     progress: Callable[[dict[str, Any]], None] | None,
 ) -> dict[str, Any]:
     """Page GetLeads until enough PE keepers pass, or the scan cap is hit."""
@@ -235,12 +284,27 @@ def _build_pe_until_full(
                     if domain:
                         kept_domains.add(domain)
                     pending.append(row)
-                if not pending:
+            if not pending:
+                continue
+            if fetch_pages:
+                _score_footprints(pending, max(8, wanted - len(keepers)))
+                pending.sort(
+                    key=lambda row: row["_footprint_score"] if "_footprint_score" in row else -1,
+                    reverse=True,
+                )
+                scored = [row for row in pending if "_footprint_score" in row]
+                rest = [row for row in pending if "_footprint_score" not in row]
+                take = min(wanted - len(keepers), len(scored))
+                fresh = scored[:take]
+                pending = scored[take:] + rest
+                if not fresh:
                     continue
-            fresh = pending[: wanted - len(keepers)]
-            pending = pending[len(fresh) :]
+            else:
+                fresh = pending[: wanted - len(keepers)]
+                pending = pending[len(fresh) :]
             waterfall_parts.append(fill_missing_emails(fresh, progress=progress))
             batch_enriched = enrich_rows(fresh, "pe_partners", fetch_pages=fetch_pages, progress=progress)
+            _apply_story_gate(batch_enriched, story_first=story_first and fetch_pages)
             enriched.extend(batch_enriched)
             for row in batch_enriched:
                 if row.get("dq"):
@@ -249,6 +313,7 @@ def _build_pe_until_full(
                     continue
                 keepers.append(row)
         research = trace.as_dict()
+    _exclude_blank_stories(store, enriched)
     logger.info("pe research %s", research)
     unique_domains = {
         domain
@@ -297,7 +362,10 @@ def _delivery_payload(
     enriched: list[dict[str, str]],
     early_dq: list[dict[str, str]],
 ) -> dict[str, Any]:
+    from mobydick.research.life import cited_personal_facts
+
     keepers = [row for row in enriched if not row.get("dq")]
+    keepers.sort(key=lambda row: len(cited_personal_facts(row)), reverse=True)
     dq_rows = early_dq + [row for row in enriched if row.get("dq")]
     delivered = keepers[:wanted]
     path = store.write_delivery(name, delivered)

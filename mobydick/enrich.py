@@ -6,9 +6,15 @@ import logging
 from typing import Any, Callable
 
 from mobydick.audiences import PE_PARTNERS, normalize_audience
-from mobydick.pe_fit import assess_pe, last_name_from_text, page_disqualifies_firm
+from mobydick.pe_fit import assess_pe, firm_text_is_venture, last_name_from_text, page_disqualifies_firm
 from mobydick.research.extract import extract_person_fields
-from mobydick.research.life import NO_MODEL_WARNING, extract_life_story, gather_person_sources, llm_keys_present
+from mobydick.research.life import (
+    NO_MODEL_WARNING,
+    extract_life_story,
+    firm_venture_snippets,
+    gather_person_sources,
+    llm_keys_present,
+)
 from mobydick.research.trace import current
 from mobydick.research.web import gather_company_pages
 from mobydick.schemas import empty_row
@@ -83,7 +89,19 @@ def apply_enrichment(
         if screened.get("unresolved_name") and not pe_dq and not fetch_pages:
             pe_dq = "truncated_name"
         if fetch_pages and not pe_dq:
+            site_text = " ".join((page.get("text") or "") for page in (pages.get("pages") or []))[:6000]
+            snippets = firm_venture_snippets(row.get("company_name") or "")
+            if firm_text_is_venture(f"{raw.get('company_description') or ''}\n{site_text}\n{snippets}"):
+                row["firm_type"] = "venture capital"
+                pe_dq = "not_pe_firm"
+        if fetch_pages and not pe_dq:
+            if raw.get("_footprint_hits"):
+                row["_footprint_hits"] = raw["_footprint_hits"]
+            if "_footprint_score" in raw:
+                row["_footprint_score"] = raw["_footprint_score"]
             life_sources = gather_person_sources(row)
+            row.pop("_footprint_hits", None)
+            row.pop("_footprint_score", None)
             if screened.get("unresolved_name"):
                 resolved = last_name_from_text(
                     row.get("first_name") or "",

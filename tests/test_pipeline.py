@@ -255,3 +255,88 @@ def test_pe_keeps_paging_until_the_requested_keepers(tmp_path, monkeypatch):
     assert names == {"Ann Keeper", "Bea Keeper", "Cam Keeper"}
     assert "email" not in result["samples"][0]
     assert result["research"]["pages_fetched"] == 0
+
+
+def test_story_first_skips_resume_only_rows_and_ranks_personal_facts(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    store = Store(_settings(tmp_path))
+
+    def fake_pages(*args: object, **kwargs: object) -> dict[str, object]:
+        return {"website": "", "pages": [], "mailing_address": ""}
+
+    researched: list[str] = []
+
+    def fake_sources(row: dict[str, str], **kwargs: object) -> list[dict[str, str]]:
+        researched.append(row["full_name"])
+        name = row["full_name"]
+        if name == "Bea Keeper":
+            text = (
+                "Bea Keeper grew up in Dayton, Ohio. "
+                "She served in the U.S. Navy. "
+                "Her father ran a diner."
+            )
+        elif name == "Dee Keeper":
+            text = 'Dee Keeper said "I still write letters to my mother every week."'
+        else:
+            text = (
+                "Ada Keeper Partner Prior to founding, Ada was the CEO of Liberty Fitness. "
+                "Ada received an MBA from Stanford University."
+            )
+        return [{"url": f"https://example.com/{name}", "title": name, "kind": "bio", "text": text}]
+
+    def fake_footprint(row: dict[str, str]) -> dict[str, object]:
+        score = 9 if row["full_name"] == "Bea Keeper" else 0
+        return {"score": score, "hits": []}
+
+    monkeypatch.setattr("mobydick.enrich.gather_company_pages", fake_pages)
+    monkeypatch.setattr("mobydick.enrich.gather_person_sources", fake_sources)
+    monkeypatch.setattr("mobydick.research.life.public_footprint", fake_footprint)
+    monkeypatch.setattr("mobydick.pipeline.pe_scan_cap", lambda wanted: 150)
+
+    class FakeLeads:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
+            if offset == 0:
+                page = [
+                    _pe_row("Ada Keeper", "ada.com"),
+                    _pe_row("Bea Keeper", "bea.com"),
+                ]
+                page.extend(
+                    _pe_row(
+                        f"Extra {index}",
+                        f"extra{index}.com",
+                        company_name="Nope Holdings",
+                        company_description="a holdings company",
+                    )
+                    for index in range(limit - 2)
+                )
+                return page
+            return [_pe_row("Dee Keeper", "dee.com")]
+
+    result = build_enriched_list(
+        "pe_partners",
+        2,
+        store=store,
+        getleads=FakeLeads(),
+        fetch_pages=True,
+    )
+    assert result["delivered"] == 2
+    assert result["shortfall"] == 0
+    assert result["dq_reasons"].get("no_personal_story", 0) >= 1
+    assert researched[0] == "Bea Keeper"
+    assert [sample["full_name"] for sample in result["samples"]] == ["Bea Keeper", "Dee Keeper"]
+    assert "ada.com" in store.exclude_domains("pe_partners")
+
+    class OnlyResume:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
+            return [_pe_row("Ada Keeper", "ada2.com")]
+
+    short = build_enriched_list(
+        "pe_partners",
+        1,
+        store=Store(_settings(tmp_path / "short")),
+        getleads=OnlyResume(),
+        fetch_pages=True,
+    )
+    assert short["delivered"] == 0
+    assert short["shortfall"] == 1
