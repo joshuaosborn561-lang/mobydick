@@ -752,6 +752,97 @@ def _opens_with_person(text: str, first: str, last: str) -> bool:
     return _mentions_first(opening, first)
 
 
+_SAY = r"(?:said|says|told|recalled|added|explained|noted|wrote)"
+
+
+def _names_this_person(speaker: str, first: str, last: str) -> bool:
+    tokens = [token for token in re.split(r"\s+", speaker or "") if token]
+    if not tokens:
+        return False
+    if last and any(token.lower() == last.lower() for token in tokens):
+        return True
+    return bool(first and len(tokens) == 1 and tokens[0].lower() == first.lower())
+
+
+def _speaker_is_other(sentence: str, first: str, last: str) -> bool:
+    """True when a named person other than this one is the speaker."""
+    patterns = (
+        re.compile(rf"\b({_NAME_WORD}(?:\s+{_NAME_WORD})?)\s+{_SAY}\b"),
+        re.compile(rf"\b{_SAY}\s+({_NAME_WORD}(?:\s+{_NAME_WORD})?)\b"),
+    )
+    speakers = [match.group(1) for pattern in patterns for match in pattern.finditer(sentence or "")]
+    if not speakers:
+        return False
+    return any(not _names_this_person(speaker, first, last) for speaker in speakers)
+
+
+def _other_family_possessive(sentence: str, first: str, last: str) -> bool:
+    if not _FAMILY.search(sentence or ""):
+        return False
+    for match in _POSSESSIVE_NAME.finditer(sentence or ""):
+        token = match.group(1)
+        key = token.lower()
+        if key in _NOT_A_POSSESSIVE_NAME or key in _NOT_A_PERSON:
+            continue
+        if _names_this_person(token, first, last):
+            continue
+        if len(_compact_name(token)) >= 3:
+            return True
+    return False
+
+
+def _blocks_quote(sentence: str, first: str, last: str) -> bool:
+    return _speaker_is_other(sentence, first, last)
+
+
+def _blocks_family(sentence: str, first: str, last: str) -> bool:
+    return _speaker_is_other(sentence, first, last) or _other_family_possessive(sentence, first, last)
+
+
+def _outside_quotes(sentence: str) -> str:
+    return _QUOTE.sub(" ", sentence or "")
+
+
+def _slot_outside_other_speech(key: str, outside: str, firm: str) -> bool:
+    """A fact another person said does not count, even when this person is named as the listener."""
+    if key == "quotes":
+        return False
+    if key == "hometown":
+        return _is_hometown_sentence(outside)
+    if key == "family_background":
+        return bool(_FAMILY.search(outside) and not _is_hometown_sentence(outside))
+    if key == "college":
+        return _is_college(outside)
+    if key == "military_service":
+        return _is_military(outside)
+    if key == "early_jobs":
+        return _is_employer(outside, firm)
+    if key == "causes":
+        return _named_cause(outside)
+    if key == "life_events":
+        return _is_life_event(outside)
+    if key == "why":
+        return _why_counts(outside)
+    return False
+
+
+def _passage_blocks(key: str, value: str, passages: list[dict[str, str]], first: str, last: str) -> bool:
+    folded = re.sub(r"\s+", " ", value or "").lower()
+    if len(folded) < 12:
+        return False
+    if key == "family_background":
+        blocks = _blocks_family
+    elif key in {"quotes", "life_events", "why", "causes", "early_jobs"}:
+        blocks = _blocks_quote
+    else:
+        return False
+    for source in passages:
+        for sentence in _sentences(source.get("text") or ""):
+            if folded in re.sub(r"\s+", " ", sentence).lower() and blocks(sentence, first, last):
+                return True
+    return False
+
+
 def _endorses_other(sentence: str, first: str, last: str) -> bool:
     """A blurb or review about someone else is not this person's fact."""
     if not sentence or not _ENDORSE.search(sentence):
@@ -912,9 +1003,21 @@ def _heuristic_from_passages(
             if _why_counts(sentence):
                 slots.append(("why", clipped))
             spoken = _spoken_quote(sentence) if _quote_ok(source) else ""
-            if spoken and _sentence_about(spoken, first, last, passage_is_theirs):
+            if spoken and _sentence_about(spoken, first, last, passage_is_theirs) and not _blocks_quote(sentence, first, last):
                 slots.append(("quotes", _clip(spoken)))
             if not slots:
+                continue
+            if _speaker_is_other(sentence, first, last):
+                outside = _outside_quotes(sentence)
+                slots = [
+                    (key, value)
+                    for key, value in slots
+                    if _slot_outside_other_speech(key, outside, firm)
+                ]
+            elif _other_family_possessive(sentence, first, last):
+                slots = [(key, value) for key, value in slots if key != "family_background"]
+            if not slots:
+                reject("other_person")
                 continue
             if not about:
                 if is_junk(sentence):
@@ -1003,6 +1106,7 @@ def _llm_fill(full_name: str, firm: str, passages: list[dict[str, str]], found: 
         "Golf, basketball, and mentoring belong in life_events.\n"
         "quotes must be first-person words the person said. Do not quote a third-person description.\n"
         "Do not quote a blurb, review, or endorsement of someone else.\n"
+        "Do not use a quote or a family fact that another named person said.\n"
         "An age or a birth year alone is not a hometown and not a life event.\n"
         "Do not infer, summarize, or combine facts. No home addresses.\n"
         "Return JSON with keys hometown, family_background, college, military_service, early_jobs, why, causes, life_events, quotes.\n"
@@ -1039,6 +1143,11 @@ def _llm_fill(full_name: str, firm: str, passages: list[dict[str, str]], found: 
             continue
         if not _fits_field(key, grounded, firm):
             reject("wrong_field")
+            continue
+        if key in {"quotes", "family_background", "life_events", "why", "causes", "early_jobs"} and _passage_blocks(
+            key, grounded, passages, first, last
+        ):
+            reject("other_person")
             continue
         if any(grounded == existing for existing in found.values() if existing):
             continue

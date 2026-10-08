@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from mobydick.audiences import PE_PARTNERS, normalize_audience
 from mobydick.pe_fit import (
     assess_pe,
+    firm_other_business_phrase,
     firm_real_estate_phrase,
     firm_self_venture_phrase,
     firm_text_pe_type,
@@ -63,9 +64,18 @@ def _enrich_pe_person(
         pe_dq = "truncated_name"
     if fetch_pages and not pe_dq:
         identity = _identity_text(pages.get("pages") or [])
-        estate_phrase = firm_real_estate_phrase(identity)
-        venture_phrase = "" if estate_phrase else firm_self_venture_phrase(row.get("company_name") or "", identity)
-        if estate_phrase:
+        other_kind, other_phrase = firm_other_business_phrase(row.get("company_name") or "", identity)
+        estate_phrase = "" if other_phrase else firm_real_estate_phrase(identity)
+        venture_phrase = (
+            ""
+            if other_phrase or estate_phrase
+            else firm_self_venture_phrase(row.get("company_name") or "", identity)
+        )
+        if other_phrase:
+            row["firm_type"] = other_kind
+            pe_dq = "not_pe_firm"
+            note_not_pe(row.get("company_name") or "", other_phrase)
+        elif estate_phrase:
             row["firm_type"] = "real estate"
             pe_dq = "not_pe_firm"
             note_not_pe(row.get("company_name") or "", estate_phrase)

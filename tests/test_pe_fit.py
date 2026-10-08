@@ -2,6 +2,7 @@ from mobydick.enrich import apply_enrichment
 from mobydick.pe_fit import (
     assess_pe,
     classify_firm,
+    firm_other_business_phrase,
     firm_self_venture_phrase,
     firm_text_is_venture,
     page_disqualifies_firm,
@@ -259,6 +260,56 @@ def test_homepage_venture_claim_drops_and_a_portfolio_page_does_not(monkeypatch)
     assert estate["firm_type"] == "real estate"
     assert estate["person_verified"] == ""
     assert researched == ["Pat Partner"]
+
+    def other_pages(text: str):
+        def _pages(website: str, domain: str) -> dict[str, object]:
+            return {"website": website, "mailing_address": "", "pages": [{"url": f"https://{domain}/", "text": text}]}
+
+        return _pages
+
+    cases = [
+        ("Baker Hostetler", "baker.com", "Baker Hostetler is a law firm.", "law firm"),
+        ("Acme Consulting", "acme.com", "We are a management consulting and advisory firm.", "consulting"),
+        ("Spencer Stuart", "spencer.com", "Spencer Stuart is an executive search firm.", "executive search"),
+        ("DealBrokers", "dealbrokers.com", "We are a business broker and M&A advisory firm.", "business broker"),
+        (
+            "Battery Ventures",
+            "battery.com",
+            "Battery Ventures is a venture capital and private equity firm.",
+            "venture capital",
+        ),
+    ]
+    for name, domain, text, kind in cases:
+        monkeypatch.setattr("mobydick.enrich.gather_company_pages", other_pages(text))
+        dropped = apply_enrichment(
+            _pe(company_name=name, company_domain=domain, company_description="private equity firm"),
+            "pe_partners",
+            fetch_pages=True,
+        )
+        assert dropped["dq"] == "not_pe_firm", name
+        assert dropped["firm_type"] == kind, name
+        assert dropped["person_verified"] == ""
+
+    monkeypatch.setattr(
+        "mobydick.enrich.gather_company_pages",
+        other_pages(
+            "Northline Capital is a private equity firm. "
+            "The firm hired an executive search firm for one portfolio company."
+        ),
+    )
+    kept_search = apply_enrichment(_pe(), "pe_partners", fetch_pages=True)
+    assert kept_search["dq"] == ""
+    assert kept_search["firm_type"] == "private equity"
+    assert firm_other_business_phrase("Northline Capital", "Northline Capital is a private equity firm.") == ("", "")
+    assert firm_self_venture_phrase(
+        "Celerity Partners",
+        "Celerity Partners is a private equity and venture capital firm specializing in late venture.",
+        blurb=True,
+    ) == ""
+    assert firm_self_venture_phrase(
+        "Battery Ventures",
+        "Battery Ventures is a venture capital and private equity firm.",
+    )
 
 
 def test_truncated_last_name_resolves_only_from_a_real_slug():

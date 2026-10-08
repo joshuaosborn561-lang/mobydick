@@ -123,7 +123,11 @@ def start_job(
         _persist(job)
         try:
             job.result = fn(job) or {}
-            job.status = "completed"
+            if isinstance(job.result, dict) and job.result.get("partial"):
+                job.status = "completed_partial"
+                job.error = str(job.result.get("error") or "")[:4000]
+            else:
+                job.status = "completed"
         except Exception as exc:  # noqa: BLE001
             job.status = "failed"
             job.error = format_job_error(exc)

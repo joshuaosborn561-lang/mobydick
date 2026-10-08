@@ -96,7 +96,7 @@ def resolve_filename(
     job_csv_name: str | None = None,
 ) -> str:
     if (job_id or "").strip():
-        if job_status != "completed":
+        if job_status not in {"completed", "completed_partial"}:
             raise ValueError("job is not completed")
         name = Path(job_csv_name or "").name
         if not name:
