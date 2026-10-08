@@ -126,14 +126,19 @@ def contact_from_raw(raw: dict[str, Any]) -> dict[str, str]:
     }
 
 
-# A state-heavy query with no industry filter was dying at about 50 seconds.
-# Large searches wait longer. Dropping industries waits longer still.
+# GetLeads aborts search_contacts at 50s and returns error search_timeout.
+# "Search timed out after 50s. Narrow the query ... reduce limit ..."
+# A longer client wait does not raise that server cap. It only lets us read
+# the tool error. Wide calls stay small enough to finish inside 50s.
 SEARCH_TIMEOUT = 90
 LARGE_SEARCH_TIMEOUT = 150
 DROPPED_INDUSTRY_TIMEOUT = 210
 STATE_BATCH = 3
 TITLE_BATCH = 3
 INDUSTRY_PROBE = 3
+NARROW_PAGE_SIZE = 100
+# A page of 100 on states + titles + description hit the 50s server cap.
+WIDE_PAGE_SIZE = 25
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -155,8 +160,21 @@ def _chunks(items: list[Any], size: int) -> list[list[Any]]:
     return [items[index : index + width] for index in range(0, len(items), width)]
 
 
+def search_page_limit(
+    filters: dict[str, Any],
+    *,
+    industries_dropped: bool = False,
+    remaining: int = NARROW_PAGE_SIZE,
+) -> int:
+    """Rows to request. Wide slices stay at 25 so GetLeads can finish in 50s."""
+    ceiling = NARROW_PAGE_SIZE
+    if industries_dropped or len(_as_list(filters.get("states"))) > 1:
+        ceiling = WIDE_PAGE_SIZE
+    return max(1, min(int(ceiling), int(remaining), NARROW_PAGE_SIZE))
+
+
 def search_timeout_for(filters: dict[str, Any], *, industries_dropped: bool = False) -> int:
-    """Seconds to wait on search_contacts. Wider filters get more time."""
+    """Client wait. This does not extend GetLeads' 50s search_timeout."""
     if industries_dropped:
         return DROPPED_INDUSTRY_TIMEOUT
     states = _as_list(filters.get("states"))

@@ -133,15 +133,20 @@ def test_wide_filters_are_split_and_wait_longer():
         SEARCH_TIMEOUT,
         industry_probe_slices,
         search_filter_slices,
+        search_page_limit,
         search_timeout_for,
     )
 
     small = {"job_titles": ["Partner"], "states": ["Texas"]}
-    assert search_timeout_for(small) == SEARCH_TIMEOUT
     large = {
         "job_titles": ["Partner", "Principal", "Founder", "Director"],
         "states": ["AL", "AK", "AZ", "AR"],
     }
+    assert search_page_limit(small) == 100
+    assert search_page_limit(large) == 25
+    assert search_page_limit(small, industries_dropped=True) == 25
+    assert search_page_limit(large, remaining=10) == 10
+    assert search_timeout_for(small) == SEARCH_TIMEOUT
     assert search_timeout_for(large) == LARGE_SEARCH_TIMEOUT
     assert search_timeout_for(small, industries_dropped=True) == DROPPED_INDUSTRY_TIMEOUT
 

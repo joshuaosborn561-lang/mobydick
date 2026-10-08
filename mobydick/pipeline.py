@@ -331,7 +331,7 @@ def _build_pe_until_full(
     """Page GetLeads until enough PE keepers pass, or the scan cap is hit."""
     import requests
 
-    from mobydick.getleads import search_filter_slices
+    from mobydick.getleads import search_filter_slices, search_page_limit
     from mobydick.pe_fit import assess_pe
     from mobydick.research.trace import tracing
     from mobydick.getleads_gate import claim_person, release_people, reserve_search_offset
@@ -384,7 +384,11 @@ def _build_pe_until_full(
                     spec = queue[index]
                     if spec.industries_dropped:
                         broadened = True
-                    limit = min(100, cap - len(scanned))
+                    limit = search_page_limit(
+                        spec.filters,
+                        industries_dropped=spec.industries_dropped,
+                        remaining=cap - len(scanned),
+                    )
                     page_offset = reserve_search_offset(spec.filters, limit, store.settings.data_dir)
                     try:
                         batch = client.search(

@@ -480,6 +480,7 @@ def test_empty_industry_query_tries_a_few_then_splits_states(tmp_path, monkeypat
                     "industries": list(filters.get("industries") or []),
                     "states": list(filters.get("states") or []),
                     "dropped": bool(kwargs.get("industries_dropped")),
+                    "limit": limit,
                 }
             )
             if kwargs.get("industries_dropped") and filters.get("states") == ["AL", "AK", "AZ"]:
@@ -501,6 +502,7 @@ def test_empty_industry_query_tries_a_few_then_splits_states(tmp_path, monkeypat
     assert result["industry_probe"]["states"] == 5
     assert result["industry_probe"]["tried_one_at_a_time"] == industries[:3]
     assert all(len(call["states"]) <= 3 for call in calls)
+    assert all(call["limit"] <= 25 for call in calls)
     assert calls[0]["industries"] == industries
     assert calls[0]["states"] == ["AL", "AK", "AZ"]
     dropped_at = next(index for index, call in enumerate(calls) if call["dropped"])
