@@ -126,6 +126,98 @@ def contact_from_raw(raw: dict[str, Any]) -> dict[str, str]:
     }
 
 
+# GetLeads aborts search_contacts at 50s and returns error search_timeout.
+# "Search timed out after 50s. Narrow the query ... reduce limit ..."
+# A longer client wait does not raise that server cap. It only lets us read
+# the tool error. Wide calls stay small enough to finish inside 50s.
+SEARCH_TIMEOUT = 90
+LARGE_SEARCH_TIMEOUT = 150
+DROPPED_INDUSTRY_TIMEOUT = 210
+STATE_BATCH = 3
+TITLE_BATCH = 3
+INDUSTRY_PROBE = 3
+NARROW_PAGE_SIZE = 100
+# A page of 100 on states + titles + description hit the 50s server cap.
+WIDE_PAGE_SIZE = 25
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return list(value)
+    return [value]
+
+
+def _with_key(filters: dict[str, Any], key: str, value: Any) -> dict[str, Any]:
+    copied = dict(filters)
+    copied[key] = value
+    return copied
+
+
+def _chunks(items: list[Any], size: int) -> list[list[Any]]:
+    width = max(1, int(size))
+    return [items[index : index + width] for index in range(0, len(items), width)]
+
+
+def search_page_limit(
+    filters: dict[str, Any],
+    *,
+    industries_dropped: bool = False,
+    remaining: int = NARROW_PAGE_SIZE,
+) -> int:
+    """Rows to request. Wide slices stay at 25 so GetLeads can finish in 50s."""
+    ceiling = NARROW_PAGE_SIZE
+    if industries_dropped or len(_as_list(filters.get("states"))) > 1:
+        ceiling = WIDE_PAGE_SIZE
+    return max(1, min(int(ceiling), int(remaining), NARROW_PAGE_SIZE))
+
+
+def search_timeout_for(filters: dict[str, Any], *, industries_dropped: bool = False) -> int:
+    """Client wait. This does not extend GetLeads' 50s search_timeout."""
+    if industries_dropped:
+        return DROPPED_INDUSTRY_TIMEOUT
+    states = _as_list(filters.get("states"))
+    titles = _as_list(filters.get("job_titles"))
+    excludes = _as_list(filters.get("exclude_domains"))
+    if len(states) > STATE_BATCH or len(titles) > TITLE_BATCH or len(excludes) >= 100:
+        return LARGE_SEARCH_TIMEOUT
+    return SEARCH_TIMEOUT
+
+
+def search_filter_slices(filters: dict[str, Any]) -> list[dict[str, Any]]:
+    """Split a wide filter so one search_contacts call can finish.
+
+    Many states go out in batches of three. After industries are gone, a long
+    title list is split the same way. A short filter stays one query.
+    """
+    states = _as_list(filters.get("states"))
+    titles = _as_list(filters.get("job_titles"))
+    if len(states) > STATE_BATCH:
+        return [_with_key(filters, "states", chunk) for chunk in _chunks(states, STATE_BATCH)]
+    if not _as_list(filters.get("industries")) and len(titles) > TITLE_BATCH:
+        return [_with_key(filters, "job_titles", chunk) for chunk in _chunks(titles, TITLE_BATCH)]
+    return [dict(filters)]
+
+
+def industry_probe_slices(filters: dict[str, Any]) -> list[dict[str, Any]]:
+    """A few industries, one at a time, before the industry filter is removed."""
+    industries = _as_list(filters.get("industries"))
+    if len(industries) <= 1:
+        return []
+    slices: list[dict[str, Any]] = []
+    for industry in industries[:INDUSTRY_PROBE]:
+        slices.extend(search_filter_slices(_with_key(filters, "industries", [industry])))
+    return slices
+
+
+def dropped_industry_slices(filters: dict[str, Any]) -> list[dict[str, Any]]:
+    if not _as_list(filters.get("industries")):
+        return []
+    dropped = {key: value for key, value in filters.items() if key != "industries"}
+    return search_filter_slices(dropped)
+
+
 class GetLeadsClient:
     def __init__(
         self,
@@ -164,13 +256,18 @@ class GetLeadsClient:
         *,
         limit: int = 100,
         offset: int = 0,
+        timeout: int | None = None,
+        industries_dropped: bool = False,
     ) -> list[dict[str, str]]:
         args = getleads_search_args(filters)
         args["limit"] = max(1, min(int(limit), 100))
         args["offset"] = max(0, int(offset))
         args["columns"] = list(GETLEADS_EXPORT_COLUMNS)
+        chosen = search_timeout_for(filters, industries_dropped=industries_dropped)
+        if timeout is not None:
+            chosen = timeout
         with getleads_slot():
-            data = self.client().call_tool("search_contacts", args)
+            data = self.client().call_tool("search_contacts", args, timeout=chosen)
         return [contact_from_raw(row) for row in unwrap_records(data)]
 
     def pull(

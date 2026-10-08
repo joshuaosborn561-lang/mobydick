@@ -211,12 +211,18 @@ class McpHttpClient:
             headers["Mcp-Session-Id"] = self._session_id
         return headers
 
-    def _post(self, payload: dict[str, Any], *, include_protocol: bool) -> requests.Response:
+    def _post(
+        self,
+        payload: dict[str, Any],
+        *,
+        include_protocol: bool,
+        timeout: float | None = None,
+    ) -> requests.Response:
         return self._session.post(
             self.url,
             json=payload,
             headers=self._headers(include_protocol=include_protocol),
-            timeout=self.timeout,
+            timeout=self.timeout if timeout is None else timeout,
         )
 
     def initialize(self) -> dict[str, Any]:
@@ -259,18 +265,24 @@ class McpHttpClient:
         self._initialized = True
         return result
 
-    def _rpc_once(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _rpc_once(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         rpc_id = self._next_rpc_id()
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": rpc_id, "method": method}
         if params is not None:
             payload["params"] = params
-        resp = self._post(payload, include_protocol=True)
+        resp = self._post(payload, include_protocol=True, timeout=timeout)
         if resp.status_code == 404 and self._session_id:
             with self._lock:
                 self._session_id = ""
                 self._initialized = False
                 self._initialize_locked()
-            resp = self._post(payload, include_protocol=True)
+            resp = self._post(payload, include_protocol=True, timeout=timeout)
         if resp.status_code >= 400:
             body = (resp.text or "")[:ERROR_BODY_LIMIT]
             raise McpError(
@@ -280,13 +292,19 @@ class McpHttpClient:
             )
         return parse_mcp_response(resp, rpc_id)
 
-    def _rpc(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _rpc(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         if not self._initialized:
             self.initialize()
         last_error: Exception | None = None
         for attempt in range(1, MAX_RPC_ATTEMPTS + 1):
             try:
-                return self._rpc_once(method, params)
+                return self._rpc_once(method, params, timeout=timeout)
             except requests.Timeout as exc:
                 last_error = exc
             except McpError as exc:
@@ -308,8 +326,14 @@ class McpHttpClient:
         tools = result.get("tools") or []
         return [t for t in tools if isinstance(t, dict)]
 
-    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        rpc = self._rpc("tools/call", {"name": name, "arguments": arguments or {}})
+    def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        rpc = self._rpc("tools/call", {"name": name, "arguments": arguments or {}}, timeout=timeout)
         try:
             return extract_tool_result(rpc)
         except McpError as exc:

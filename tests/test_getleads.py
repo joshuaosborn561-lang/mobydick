@@ -23,9 +23,11 @@ class _FakeMcp:
     def __init__(self, payload):
         self.payload = payload
         self.calls = []
+        self.timeouts = []
 
-    def call_tool(self, name, args):
+    def call_tool(self, name, args, timeout=None):
         self.calls.append((name, args))
+        self.timeouts.append(timeout)
         if isinstance(self.payload, Exception):
             raise self.payload
         return self.payload
@@ -122,6 +124,63 @@ def test_job_error_includes_upstream_body():
     text = format_job_error(exc)
     assert "invalid_columns" in text
     assert text.startswith("McpError:")
+
+
+def test_wide_filters_are_split_and_wait_longer():
+    from mobydick.getleads import (
+        DROPPED_INDUSTRY_TIMEOUT,
+        LARGE_SEARCH_TIMEOUT,
+        SEARCH_TIMEOUT,
+        industry_probe_slices,
+        search_filter_slices,
+        search_page_limit,
+        search_timeout_for,
+    )
+
+    small = {"job_titles": ["Partner"], "states": ["Texas"]}
+    large = {
+        "job_titles": ["Partner", "Principal", "Founder", "Director"],
+        "states": ["AL", "AK", "AZ", "AR"],
+    }
+    assert search_page_limit(small) == 100
+    assert search_page_limit(large) == 25
+    assert search_page_limit(small, industries_dropped=True) == 25
+    assert search_page_limit(large, remaining=10) == 10
+    assert search_timeout_for(small) == SEARCH_TIMEOUT
+    assert search_timeout_for(large) == LARGE_SEARCH_TIMEOUT
+    assert search_timeout_for(small, industries_dropped=True) == DROPPED_INDUSTRY_TIMEOUT
+
+    states = ["AL", "AK", "AZ", "AR", "CA"]
+    slices = search_filter_slices(
+        {"states": states, "job_titles": ["Partner"] * 6, "industries": ["Private Equity"]}
+    )
+    assert [item["states"] for item in slices] == [["AL", "AK", "AZ"], ["AR", "CA"]]
+    assert all(len(item["states"]) <= 3 for item in slices)
+
+    widened = search_filter_slices(
+        {"job_titles": ["Partner", "Principal", "Founder", "Director"], "company_description": "private equity"}
+    )
+    assert [item["job_titles"] for item in widened] == [
+        ["Partner", "Principal", "Founder"],
+        ["Director"],
+    ]
+
+    industries = ["Private Equity", "Investment Management", "Capital Markets", "Banking"]
+    probed = industry_probe_slices({"industries": industries, "states": ["Texas"], "job_titles": ["Partner"]})
+    assert [item["industries"] for item in probed] == [
+        ["Private Equity"],
+        ["Investment Management"],
+        ["Capital Markets"],
+    ]
+
+
+def test_search_sends_the_longer_timeout_when_industries_were_dropped():
+    from mobydick.getleads import DROPPED_INDUSTRY_TIMEOUT
+
+    fake = _FakeMcp({"contacts": []})
+    client = GetLeadsClient(client=fake)
+    client.search({"job_titles": ["Partner"], "states": ["Texas"]}, industries_dropped=True)
+    assert fake.timeouts == [DROPPED_INDUSTRY_TIMEOUT]
 
 
 def test_search_failure_message_includes_tool_body():
