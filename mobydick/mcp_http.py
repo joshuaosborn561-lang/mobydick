@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import threading
+import time
 from typing import Any
 
 import requests
@@ -15,6 +17,9 @@ logger = logging.getLogger("mobydick.mcp_http")
 ERROR_BODY_LIMIT = 4000
 
 DEFAULT_PROTOCOL = "2025-03-26"
+# CloudFront 502/503/504 and timeouts are transient. Five tries, then surface the error.
+RETRY_STATUSES = frozenset({502, 503, 504})
+MAX_RPC_ATTEMPTS = 5
 
 
 class McpError(Exception):
@@ -94,6 +99,12 @@ def parse_mcp_response(response: requests.Response, request_id: Any) -> dict[str
     if isinstance(data, dict):
         return data
     raise McpError("MCP JSON was not an object", status=response.status_code, body=text[:300])
+
+
+def backoff_seconds(attempt: int) -> float:
+    """Exponential delay with jitter. attempt is 1-based for the try that just failed."""
+    base = 0.5 * (2 ** max(0, attempt - 1))
+    return base + random.uniform(0, base * 0.25)
 
 
 def tool_error_detail(result: dict[str, Any]) -> str:
@@ -178,6 +189,7 @@ class McpHttpClient:
         self._session_id = ""
         self._protocol = DEFAULT_PROTOCOL
         self._initialized = False
+        self._sleeper = time.sleep
 
     def _next_rpc_id(self) -> int:
         with self._id_lock:
@@ -247,9 +259,7 @@ class McpHttpClient:
         self._initialized = True
         return result
 
-    def _rpc(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        if not self._initialized:
-            self.initialize()
+    def _rpc_once(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         rpc_id = self._next_rpc_id()
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": rpc_id, "method": method}
         if params is not None:
@@ -269,6 +279,28 @@ class McpHttpClient:
                 body=body,
             )
         return parse_mcp_response(resp, rpc_id)
+
+    def _rpc(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self._initialized:
+            self.initialize()
+        last_error: Exception | None = None
+        for attempt in range(1, MAX_RPC_ATTEMPTS + 1):
+            try:
+                return self._rpc_once(method, params)
+            except requests.Timeout as exc:
+                last_error = exc
+            except McpError as exc:
+                if exc.status not in RETRY_STATUSES or exc.is_tool_error:
+                    raise
+                last_error = exc
+            if attempt >= MAX_RPC_ATTEMPTS:
+                break
+            delay = backoff_seconds(attempt)
+            logger.warning("MCP %s attempt %s failed (%s); retrying in %.2fs", method, attempt, last_error, delay)
+            self._sleeper(delay)
+        if isinstance(last_error, McpError):
+            raise last_error
+        raise McpError(f"MCP timeout: {last_error}", status=504, body=str(last_error or "")) from last_error
 
     def list_tools(self) -> list[dict[str, Any]]:
         rpc = self._rpc("tools/list")

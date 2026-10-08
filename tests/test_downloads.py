@@ -131,6 +131,13 @@ def test_download_by_job_id(tmp_path, monkeypatch):
     assert payload["filename"] == path.name
     assert payload["download_url"].startswith(f"https://mobydick.example/deliveries/{path.name}?")
     assert "Ada Founder" in payload["csv_text"]
+    partial = build_delivery_download(
+        job_id="abc123",
+        deliveries_dir=store.settings.deliveries_dir,
+        job_status="completed_partial",
+        job_csv_name=path.name,
+    )
+    assert partial["filename"] == path.name
     with pytest.raises(ValueError):
         build_delivery_download(
             job_id="abc123",

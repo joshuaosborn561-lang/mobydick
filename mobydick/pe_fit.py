@@ -536,6 +536,63 @@ def _rough_sentences(text: str) -> list[str]:
     return [part.replace("<dot>", ".").strip() for part in parts if part.strip()]
 
 
+_IDENTITY_CLAIM = re.compile(
+    r"\b(?:we are|we're|we’re|is an?|are an?)\b",
+    re.IGNORECASE,
+)
+_HIRED_OUT = re.compile(
+    r"\b(?:hired|retained|engaged|uses|using|through|outsourc\w*)\b",
+    re.IGNORECASE,
+)
+_OTHER_BUSINESS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?:law firm|attorneys at law)\b", re.IGNORECASE), "law firm"),
+    (
+        re.compile(
+            r"\b(?:business broker(?:age)?|m\s*&\s*a advisory|mergers and acquisitions advisory)\b",
+            re.IGNORECASE,
+        ),
+        "business broker",
+    ),
+    (
+        re.compile(
+            r"\b(?:(?:management |strategy )?consulting firm|(?:management |strategy |business )advisory firm|"
+            r"(?<!m&a )(?<!m & a )advisory firm|"
+            r"consulting and advisory firm|advisory and consulting firm)\b",
+            re.IGNORECASE,
+        ),
+        "consulting",
+    ),
+    (
+        re.compile(
+            r"\b(?:executive search firm|executive recruiting(?:\s+firm)?|recruiting firm|retained search firm)\b",
+            re.IGNORECASE,
+        ),
+        "executive search",
+    ),
+)
+
+
+def firm_other_business_phrase(name: str, text: str) -> tuple[str, str]:
+    """Homepage or about text that says this firm is not a PE investor.
+
+    A PE firm that hires a search firm, or that lists consulting as a service
+    it buys, is not one of these. Empty when the page does not claim it.
+    """
+    for sentence in _rough_sentences(text or ""):
+        if _unusable_firm_sentence(sentence) or _NOT_FIRM_SENTENCE.search(sentence):
+            continue
+        if not _IDENTITY_CLAIM.search(sentence):
+            continue
+        if _HIRED_OUT.search(sentence):
+            continue
+        for pattern, label in _OTHER_BUSINESS:
+            if not pattern.search(sentence):
+                continue
+            phrase = re.sub(r"\s+", " ", sentence).strip()[:180]
+            return label, phrase
+    return "", ""
+
+
 def firm_self_venture_phrase(name: str, text: str, *, blurb: bool = False) -> str:
     """Sentence where this firm calls itself a venture or seed investor.
 
@@ -546,8 +603,14 @@ def firm_self_venture_phrase(name: str, text: str, *, blurb: bool = False) -> st
         return ""
     tokens = _firm_tokens(name)
     for sentence in _rough_sentences(text):
-        if _unusable_firm_sentence(sentence) or _both_pe_and_venture(sentence):
+        if _unusable_firm_sentence(sentence):
             continue
+        if _both_pe_and_venture(sentence):
+            # Private equity named first stays a PE firm. Venture named first is a VC firm.
+            pe_at = _PE_WORD.search(sentence)
+            vc_at = _VC_WORD.search(sentence)
+            if pe_at and vc_at and pe_at.start() <= vc_at.start():
+                continue
         if _NOT_FIRM_SENTENCE.search(sentence) or _NOT_A_VC_CLAIM.search(sentence):
             continue
         if _ADVISORY_SENTENCE.search(sentence) and not _SELF_VOICE.search(sentence):

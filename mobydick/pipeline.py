@@ -276,144 +276,167 @@ def _build_pe_until_full(
     from mobydick.pe_fit import assess_pe
     from mobydick.research.trace import tracing
 
+    from mobydick.getleads_gate import claim_person, release_people, reserve_search_offset
+    from mobydick.mcp_http import McpError
+
     cap = pe_scan_cap(wanted, story_first=story_first)
     scanned: list[dict[str, str]] = []
     enriched: list[dict[str, str]] = []
     keepers: list[dict[str, str]] = []
     early_dq: list[dict[str, str]] = []
     kept_domains: set[str] = set()
-    offset = 0
     dropped_prior = 0
     pending: list[dict[str, str]] = []
     exhausted = False
     broadened = False
     stop_reason = "source_exhausted"
+    upstream_error = ""
     active_filters = dict(filters)
     seen_people: set[str] = set()
+    claimed: set[str] = set()
     waterfall_parts: list[dict[str, Any]] = []
-    with tracing() as trace:
-        while len(keepers) < wanted:
-            if not pending:
-                if len(scanned) >= cap:
-                    stop_reason = "scan_cap"
-                    break
-                if exhausted:
-                    # The industry slice ran out before the cap. Page once without it.
-                    if not broadened and "industries" in active_filters:
-                        active_filters = {
-                            key: value for key, value in active_filters.items() if key != "industries"
-                        }
-                        offset = 0
-                        exhausted = False
-                        broadened = True
+    try:
+        with tracing() as trace:
+            while len(keepers) < wanted:
+                if not pending:
+                    if len(scanned) >= cap:
+                        stop_reason = "scan_cap"
+                        break
+                    if exhausted:
+                        # The industry slice ran out before the cap. Page once without it.
+                        if not broadened and "industries" in active_filters:
+                            active_filters = {
+                                key: value for key, value in active_filters.items() if key != "industries"
+                            }
+                            exhausted = False
+                            broadened = True
+                            continue
+                        stop_reason = "source_exhausted"
+                        break
+                    limit = min(100, cap - len(scanned))
+                    page_offset = reserve_search_offset(active_filters, limit, store.settings.data_dir)
+                    try:
+                        batch = client.search(active_filters, limit=limit, offset=page_offset)
+                    except McpError as exc:
+                        upstream_error = f"MCP HTTP {exc.status}: {exc}"[:500]
+                        stop_reason = "upstream_error"
+                        break
+                    if not batch:
+                        exhausted = True
                         continue
-                    stop_reason = "source_exhausted"
-                    break
-                limit = min(100, cap - len(scanned))
-                batch = client.search(active_filters, limit=limit, offset=offset)
-                if not batch:
-                    exhausted = True
-                    continue
-                offset += len(batch)
-                scanned.extend(batch)
-                if len(batch) < limit:
-                    exhausted = True
-                if progress:
-                    progress(
-                        {
-                            "stage": "pull",
-                            "scanned": len(scanned),
-                            "scan_cap": cap,
-                            "keepers": len(keepers),
-                            "broadened": broadened,
-                        }
-                    )
-                for row in batch:
-                    person = _person_key(row)
-                    if person in seen_people:
-                        continue
-                    seen_people.add(person)
-                    domain = normalize_domain(row.get("company_domain"))
-                    if domain and domain in excluded:
-                        dropped_prior += 1
-                        continue
-                    if domain and domain in kept_domains:
-                        continue
-                    verdict = assess_pe(row)
-                    reason = _apply_pe_verdict(row, verdict)
-                    if reason:
-                        early_dq.append(
+                    scanned.extend(batch)
+                    if len(batch) < limit:
+                        exhausted = True
+                    if progress:
+                        progress(
                             {
-                                "dq": reason,
-                                "firm_type": verdict.get("firm_type") or "",
-                                "firm": row.get("company_name") or "",
-                                "phrase": verdict.get("dq_phrase") or "",
+                                "stage": "pull",
+                                "scanned": len(scanned),
+                                "scan_cap": cap,
+                                "keepers": len(keepers),
+                                "broadened": broadened,
                             }
                         )
-                        from mobydick.research.trace import drop_person, note_not_pe
+                    for row in batch:
+                        person = _person_key(row)
+                        if person in seen_people:
+                            continue
+                        if not claim_person(person):
+                            continue
+                        claimed.add(person)
+                        seen_people.add(person)
+                        domain = normalize_domain(row.get("company_domain"))
+                        if domain and domain in excluded:
+                            dropped_prior += 1
+                            continue
+                        if domain and domain in kept_domains:
+                            continue
+                        verdict = assess_pe(row)
+                        reason = _apply_pe_verdict(row, verdict)
+                        if reason:
+                            early_dq.append(
+                                {
+                                    "dq": reason,
+                                    "firm_type": verdict.get("firm_type") or "",
+                                    "firm": row.get("company_name") or "",
+                                    "phrase": verdict.get("dq_phrase") or "",
+                                }
+                            )
+                            from mobydick.research.trace import drop_person, note_not_pe
 
-                        drop_person(reason)
-                        if reason == "not_pe_firm":
-                            note_not_pe(row.get("company_name") or "", verdict.get("dq_phrase") or "")
+                            drop_person(reason)
+                            if reason == "not_pe_firm":
+                                note_not_pe(row.get("company_name") or "", verdict.get("dq_phrase") or "")
+                            continue
+                        if domain:
+                            kept_domains.add(domain)
+                        pending.append(row)
+                if not pending:
+                    continue
+                if fetch_pages:
+                    _score_footprints(pending, max(8, wanted - len(keepers)))
+                    pending.sort(
+                        key=lambda row: row["_footprint_score"] if "_footprint_score" in row else -1,
+                        reverse=True,
+                    )
+                    scored = [row for row in pending if "_footprint_score" in row]
+                    rest = [row for row in pending if "_footprint_score" not in row]
+                    take = min(wanted - len(keepers), len(scored))
+                    fresh = scored[:take]
+                    pending = scored[take:] + rest
+                    if not fresh:
                         continue
-                    if domain:
-                        kept_domains.add(domain)
-                    pending.append(row)
-            if not pending:
-                continue
-            if fetch_pages:
-                _score_footprints(pending, max(8, wanted - len(keepers)))
-                pending.sort(
-                    key=lambda row: row["_footprint_score"] if "_footprint_score" in row else -1,
-                    reverse=True,
-                )
-                scored = [row for row in pending if "_footprint_score" in row]
-                rest = [row for row in pending if "_footprint_score" not in row]
-                take = min(wanted - len(keepers), len(scored))
-                fresh = scored[:take]
-                pending = scored[take:] + rest
-                if not fresh:
-                    continue
-            else:
-                fresh = pending[: wanted - len(keepers)]
-                pending = pending[len(fresh) :]
-            waterfall_parts.append(fill_missing_emails(fresh, progress=progress))
-            batch_enriched = enrich_rows(fresh, "pe_partners", fetch_pages=fetch_pages, progress=progress)
-            _apply_story_gate(batch_enriched, story_first=story_first and fetch_pages)
-            enriched.extend(batch_enriched)
-            for row in batch_enriched:
-                if row.get("dq"):
-                    if row.get("company_domain"):
-                        kept_domains.discard(normalize_domain(row["company_domain"]))
-                    continue
-                keepers.append(row)
-        research = trace.as_dict()
-    logger.info("pe research %s", research)
-    unique_domains = {
-        domain
-        for domain in (normalize_domain(row.get("company_domain")) for row in scanned)
-        if domain
-    }
-    payload = _delivery_payload(
-        name="pe_partners",
-        wanted=wanted,
-        store=store,
-        raw_count=len(scanned),
-        unique_count=len(unique_domains),
-        dropped_prior=dropped_prior,
-        excluded_count=len(excluded),
-        waterfall_stats=_merge_waterfall(waterfall_parts),
-        enriched=enriched,
-        early_dq=early_dq,
-    )
-    if len(keepers) >= wanted:
-        stop_reason = "filled"
-    payload["research"] = research
-    payload["scanned"] = len(scanned)
-    payload["scan_cap"] = cap
-    payload["scan_stop"] = stop_reason
-    payload["broadened"] = broadened
-    return _attach_model_warning(payload, "pe_partners")
+                else:
+                    fresh = pending[: wanted - len(keepers)]
+                    pending = pending[len(fresh) :]
+                waterfall_parts.append(fill_missing_emails(fresh, progress=progress))
+                batch_enriched = enrich_rows(fresh, "pe_partners", fetch_pages=fetch_pages, progress=progress)
+                _apply_story_gate(batch_enriched, story_first=story_first and fetch_pages)
+                enriched.extend(batch_enriched)
+                for row in batch_enriched:
+                    if row.get("dq"):
+                        if row.get("company_domain"):
+                            kept_domains.discard(normalize_domain(row["company_domain"]))
+                        continue
+                    keepers.append(row)
+            research = trace.as_dict()
+        logger.info("pe research %s", research)
+        unique_domains = {
+            domain
+            for domain in (normalize_domain(row.get("company_domain")) for row in scanned)
+            if domain
+        }
+        payload = _delivery_payload(
+            name="pe_partners",
+            wanted=wanted,
+            store=store,
+            raw_count=len(scanned),
+            unique_count=len(unique_domains),
+            dropped_prior=dropped_prior,
+            excluded_count=len(excluded),
+            waterfall_stats=_merge_waterfall(waterfall_parts),
+            enriched=enriched,
+            early_dq=early_dq,
+        )
+        if len(keepers) >= wanted:
+            stop_reason = "filled"
+        if upstream_error:
+            stop_reason = "upstream_error"
+            payload["partial"] = True
+            payload["error"] = upstream_error
+            payload["note"] = (
+                "Partial list. The pull stopped on an upstream error. "
+                "The CSV has the people already verified. "
+                + str(payload.get("note") or "")
+            ).strip()
+        payload["research"] = research
+        payload["scanned"] = len(scanned)
+        payload["scan_cap"] = cap
+        payload["scan_stop"] = stop_reason
+        payload["broadened"] = broadened
+        return _attach_model_warning(payload, "pe_partners")
+    finally:
+        release_people(claimed)
 
 
 def _merge_waterfall(parts: list[dict[str, Any]]) -> dict[str, Any]:

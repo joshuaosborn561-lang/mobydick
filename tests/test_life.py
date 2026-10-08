@@ -412,6 +412,50 @@ def test_people_search_sites_and_age_only_facts_are_rejected(monkeypatch):
     assert footprint["score"] == 0
 
 
+def test_a_quote_someone_else_said_is_not_theirs(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    heard = extract_life_story(
+        "Shameek Konar",
+        [
+            {
+                "url": "https://arapartners.com/team/shameek-konar",
+                "title": "Shameek Konar",
+                "kind": "interview",
+                "text": (
+                    "Shameek Konar is a partner at Ara Partners. "
+                    "Shameek Konar grew up in Houston, Texas. "
+                    'Jimmy Haslam told Shameek Konar "I built our family business, Pilot, from one gas station."'
+                ),
+            }
+        ],
+        firm="Ara Partners",
+        domain="arapartners.com",
+        website="https://arapartners.com",
+    )
+    assert "Houston" in heard["hometown"]
+    assert "gas station" not in heard["quotes"]
+    assert "Pilot" not in heard["family_background"]
+    assert "Pilot" not in heard["real_story"]
+
+    own = extract_life_story(
+        "Shameek Konar",
+        [
+            {
+                "url": "https://arapartners.com/team/shameek-konar",
+                "title": "Shameek Konar",
+                "kind": "interview",
+                "text": 'Shameek Konar said "I built our family business, Pilot, from one gas station."',
+            }
+        ],
+        firm="Ara Partners",
+        domain="arapartners.com",
+        website="https://arapartners.com",
+    )
+    assert "gas station" in own["quotes"]
+    assert "Pilot" in own["family_background"]
+
+
 def test_another_persons_blurb_and_a_charity_board_are_not_the_story():
     guhan = extract_life_story(
         "Guhan Swaminathan",

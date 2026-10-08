@@ -392,3 +392,68 @@ def test_scan_broadens_when_the_industry_slice_runs_out(tmp_path, monkeypatch):
     assert result["scanned"] >= 2
     assert calls[0]["industries"] is True
     assert any(call["industries"] is False for call in calls)
+
+
+def test_paging_failure_keeps_people_already_verified(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    from mobydick.mcp_http import McpError
+
+    store = Store(_settings(tmp_path))
+    offsets: list[int] = []
+
+    class FakeLeads:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
+            offsets.append(offset)
+            if len(offsets) == 1:
+                page = [_pe_row("Ann Keeper", "ann.com")]
+                page.extend(
+                    _pe_row(
+                        f"Extra {index}",
+                        f"extra{index}.com",
+                        company_name="Nope Holdings",
+                        company_description="a holdings company",
+                    )
+                    for index in range(limit - 1)
+                )
+                return page
+            raise McpError("MCP HTTP 504: cloudfront", status=504, body="504 Gateway Time-out")
+
+    monkeypatch.setattr("mobydick.pipeline.pe_scan_cap", lambda wanted, story_first=False: 150)
+    result = build_enriched_list(
+        "pe_partners",
+        2,
+        store=store,
+        getleads=FakeLeads(),
+        fetch_pages=False,
+    )
+    assert offsets[0] == 0
+    assert offsets[1] == 100
+    assert result["delivered"] == 1
+    assert result["shortfall"] == 1
+    assert result["partial"] is True
+    assert result["scan_stop"] == "upstream_error"
+    assert "504" in result["error"]
+    assert result["csv_path"]
+    assert {sample["full_name"] for sample in result["samples"]} == {"Ann Keeper"}
+
+
+def test_partial_result_marks_the_job_completed_partial(tmp_path, monkeypatch):
+    import time
+
+    monkeypatch.setattr("mcp_server.jobs.JOBS_DIR", tmp_path)
+    from mcp_server.jobs import get_job, start_job
+
+    job = start_job(
+        "build_enriched_list",
+        lambda j: {"partial": True, "error": "MCP HTTP 504", "shortfall": 14, "delivered": 11},
+    )
+    fresh = job
+    for _ in range(100):
+        fresh = get_job(job.id)
+        if fresh.status in {"completed", "completed_partial", "failed"}:
+            break
+        time.sleep(0.01)
+    assert fresh.status == "completed_partial"
+    assert fresh.result["shortfall"] == 14
+    assert "504" in (fresh.error or "")

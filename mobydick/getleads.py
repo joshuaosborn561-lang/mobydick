@@ -12,6 +12,7 @@ import requests
 from mobydick.audiences import getleads_search_args
 from mobydick.config import Settings, settings as default_settings
 from mobydick.domains import normalize_domain
+from mobydick.getleads_gate import getleads_slot
 from mobydick.mcp_http import McpError, McpHttpClient
 from mobydick.schemas import GETLEADS_EXPORT_COLUMNS
 
@@ -154,7 +155,8 @@ class GetLeadsClient:
 
     def count(self, filters: dict[str, Any]) -> dict[str, Any]:
         args = getleads_search_args(filters)
-        return self.client().call_tool("count_contacts", args)
+        with getleads_slot():
+            return self.client().call_tool("count_contacts", args)
 
     def search(
         self,
@@ -167,7 +169,8 @@ class GetLeadsClient:
         args["limit"] = max(1, min(int(limit), 100))
         args["offset"] = max(0, int(offset))
         args["columns"] = list(GETLEADS_EXPORT_COLUMNS)
-        data = self.client().call_tool("search_contacts", args)
+        with getleads_slot():
+            data = self.client().call_tool("search_contacts", args)
         return [contact_from_raw(row) for row in unwrap_records(data)]
 
     def pull(
@@ -217,14 +220,16 @@ class GetLeadsClient:
         args["max_rows"] = max(1, min(int(max_rows), 50000))
         args["max_per_company"] = max(1, min(int(max_per_company), 50))
         args["columns"] = list(GETLEADS_EXPORT_COLUMNS)
-        started = self.client().call_tool("export_contacts", args)
+        with getleads_slot():
+            started = self.client().call_tool("export_contacts", args)
         export_id = str(started.get("export_id") or started.get("id") or "")
         if not export_id:
             raise RuntimeError(f"export_contacts did not return export_id: {started}")
         deadline = time.time() + 180
         status: dict[str, Any] = {}
         while time.time() < deadline:
-            status = self.client().call_tool("check_contact_export", {"export_id": export_id})
+            with getleads_slot():
+                status = self.client().call_tool("check_contact_export", {"export_id": export_id})
             job_status = str(status.get("job_status") or status.get("status") or "").lower()
             if progress:
                 progress({"export_id": export_id, "status": job_status})
