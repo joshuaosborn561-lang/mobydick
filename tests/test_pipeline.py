@@ -222,7 +222,7 @@ def test_pe_keeps_paging_until_the_requested_keepers(tmp_path, monkeypatch):
     calls: list[int] = []
 
     class FakeLeads:
-        def search(self, filters: dict, limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0, **_ignored: object) -> list[dict[str, str]]:
             calls.append(offset)
             if offset == 0:
                 page = [
@@ -303,7 +303,7 @@ def test_story_first_skips_resume_only_rows_and_ranks_personal_facts(tmp_path, m
     monkeypatch.setattr("mobydick.pipeline.pe_scan_cap", lambda wanted, story_first=False: 150)
 
     class FakeLeads:
-        def search(self, filters: dict, limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0, **_ignored: object) -> list[dict[str, str]]:
             if offset == 0:
                 page = [
                     _pe_row("Ada Keeper", "ada.com"),
@@ -339,7 +339,7 @@ def test_story_first_skips_resume_only_rows_and_ranks_personal_facts(tmp_path, m
     assert result["research"]["person_drops"].get("no_personal_story", 0) >= 1
 
     class OnlyResume:
-        def search(self, filters: dict, limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0, **_ignored: object) -> list[dict[str, str]]:
             return [_pe_row("Ada Keeper", "ada2.com")]
 
     short = build_enriched_list(
@@ -362,7 +362,7 @@ def test_scan_broadens_when_the_industry_slice_runs_out(tmp_path, monkeypatch):
     calls: list[dict[str, object]] = []
 
     class FakeLeads:
-        def search(self, filters: dict, limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0, **_ignored: object) -> list[dict[str, str]]:
             calls.append({"industries": "industries" in filters, "offset": offset})
             if filters.get("industries"):
                 return [
@@ -403,7 +403,7 @@ def test_paging_failure_keeps_people_already_verified(tmp_path, monkeypatch):
     offsets: list[int] = []
 
     class FakeLeads:
-        def search(self, filters: dict, limit: int = 100, offset: int = 0) -> list[dict[str, str]]:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0, **_ignored: object) -> list[dict[str, str]]:
             offsets.append(offset)
             if len(offsets) == 1:
                 page = [_pe_row("Ann Keeper", "ann.com")]
@@ -457,3 +457,83 @@ def test_partial_result_marks_the_job_completed_partial(tmp_path, monkeypatch):
     assert fresh.status == "completed_partial"
     assert fresh.result["shortfall"] == 14
     assert "504" in (fresh.error or "")
+
+
+def test_empty_industry_query_tries_a_few_then_splits_states(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    states = ["AL", "AK", "AZ", "AR", "CA"]
+    industries = [
+        "Venture Capital and Private Equity Principals",
+        "Investment Management",
+        "Capital Markets",
+        "Banking",
+    ]
+    calls: list[dict[str, object]] = []
+
+    class FakeLeads:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0, **kwargs: object) -> list[dict[str, str]]:
+            calls.append(
+                {
+                    "industries": list(filters.get("industries") or []),
+                    "states": list(filters.get("states") or []),
+                    "dropped": bool(kwargs.get("industries_dropped")),
+                }
+            )
+            if kwargs.get("industries_dropped") and filters.get("states") == ["AL", "AK", "AZ"]:
+                return [_pe_row("Ann Keeper", "ann.com")]
+            return []
+
+    caplog.set_level(logging.INFO, logger="mobydick.pipeline")
+    result = build_enriched_list(
+        "pe_partners",
+        1,
+        store=Store(_settings(tmp_path)),
+        getleads=FakeLeads(),
+        fetch_pages=False,
+        filters={"states": states, "industries": industries},
+    )
+    assert result["delivered"] == 1
+    assert result["broadened"] is True
+    assert result["industry_probe"]["industries"] == 4
+    assert result["industry_probe"]["states"] == 5
+    assert result["industry_probe"]["tried_one_at_a_time"] == industries[:3]
+    assert all(len(call["states"]) <= 3 for call in calls)
+    assert calls[0]["industries"] == industries
+    assert calls[0]["states"] == ["AL", "AK", "AZ"]
+    dropped_at = next(index for index, call in enumerate(calls) if call["dropped"])
+    assert any(call["industries"] == [industries[0]] for call in calls[:dropped_at])
+    assert not any(call["industries"] == ["Banking"] for call in calls)
+    assert "industries=4" in caplog.text
+    assert "states=5" in caplog.text
+    assert "trying 3 one at a time" in caplog.text
+
+
+def test_timeout_keeps_people_found_before_the_wide_query(tmp_path, monkeypatch):
+    import requests
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    class FakeLeads:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0, **_ignored: object) -> list[dict[str, str]]:
+            if filters.get("industries"):
+                return [_pe_row("Ann Keeper", "ann.com")]
+            raise requests.Timeout("read timed out after 50s")
+
+    result = build_enriched_list(
+        "pe_partners",
+        2,
+        store=Store(_settings(tmp_path)),
+        getleads=FakeLeads(),
+        fetch_pages=False,
+    )
+    assert result["delivered"] == 1
+    assert result["shortfall"] == 1
+    assert result["partial"] is True
+    assert result["scan_stop"] == "upstream_error"
+    assert "50" in result["error"]
+    assert result["csv_path"]
+    assert {sample["full_name"] for sample in result["samples"]} == {"Ann Keeper"}

@@ -109,6 +109,21 @@ def test_rpc_retries_timeouts_and_stops_after_five():
     assert caught.value.status == 504
 
 
+def test_rpc_uses_the_per_call_timeout():
+    session = _Session([])
+    seen: list[int | None] = []
+
+    def post(url, json=None, headers=None, timeout=None):
+        seen.append(timeout)
+        return _ok(json)
+
+    session.post = post
+    client = _client(session)
+    client.timeout = 90
+    client._rpc("tools/call", {"name": "search_contacts", "arguments": {}}, timeout=210)
+    assert seen == [210]
+
+
 def test_rpc_does_not_retry_a_client_error():
     session = _Session([])
 

@@ -261,6 +261,62 @@ def _apply_story_gate(rows: list[dict[str, str]], *, story_first: bool) -> None:
             drop_person("no_pages_kept" if no_pages and not row.get("sources") else "no_personal_story")
 
 
+class _SearchSlice:
+    def __init__(self, filters: dict[str, Any], *, industries_dropped: bool = False) -> None:
+        self.filters = filters
+        self.industries_dropped = industries_dropped
+
+
+def _extend_pe_plan(
+    queue: list[_SearchSlice],
+    filters: dict[str, Any],
+    *,
+    probed: bool,
+    broadened: bool,
+    empty_industry_queries: int,
+) -> tuple[bool, bool, list[str]]:
+    """After the current slices are done, probe industries, then drop them.
+
+    Returns the updated probed flag, broadened flag, and industries tried alone.
+    """
+    from mobydick.getleads import dropped_industry_slices, industry_probe_slices
+
+    industries = filters.get("industries") or []
+    if isinstance(industries, str):
+        industries = [industries]
+    states = filters.get("states") or []
+    if isinstance(states, str):
+        states = [states]
+    tried: list[str] = []
+    if not probed:
+        probed = True
+        extra = industry_probe_slices(filters)
+        tried = [str(item) for item in industries[:3]] if len(industries) > 1 else []
+        if empty_industry_queries:
+            if tried:
+                logger.info(
+                    "pe industry query empty after excludes industries=%s states=%s; trying %s one at a time",
+                    len(industries),
+                    len(states),
+                    len(tried),
+                )
+            else:
+                logger.info(
+                    "pe industry query empty after excludes industries=%s states=%s; dropping industries",
+                    len(industries),
+                    len(states),
+                )
+        if extra:
+            queue.extend(_SearchSlice(item) for item in extra)
+            return probed, broadened, tried
+    if not broadened and industries:
+        broadened = True
+        queue.extend(
+            _SearchSlice(item, industries_dropped=True) for item in dropped_industry_slices(filters)
+        )
+    return probed, broadened, tried
+
+
 def _build_pe_until_full(
     *,
     wanted: int,
@@ -273,9 +329,11 @@ def _build_pe_until_full(
     progress: Callable[[dict[str, Any]], None] | None,
 ) -> dict[str, Any]:
     """Page GetLeads until enough PE keepers pass, or the scan cap is hit."""
+    import requests
+
+    from mobydick.getleads import search_filter_slices
     from mobydick.pe_fit import assess_pe
     from mobydick.research.trace import tracing
-
     from mobydick.getleads_gate import claim_person, release_people, reserve_search_offset
     from mobydick.mcp_http import McpError
 
@@ -287,14 +345,18 @@ def _build_pe_until_full(
     kept_domains: set[str] = set()
     dropped_prior = 0
     pending: list[dict[str, str]] = []
-    exhausted = False
     broadened = False
+    probed = False
     stop_reason = "source_exhausted"
     upstream_error = ""
-    active_filters = dict(filters)
     seen_people: set[str] = set()
     claimed: set[str] = set()
     waterfall_parts: list[dict[str, Any]] = []
+    queue = [_SearchSlice(item) for item in search_filter_slices(filters)]
+    index = 0
+    slice_open = True
+    empty_industry_queries = 0
+    tried_one_at_a_time: list[str] = []
     try:
         with tracing() as trace:
             while len(keepers) < wanted:
@@ -302,31 +364,55 @@ def _build_pe_until_full(
                     if len(scanned) >= cap:
                         stop_reason = "scan_cap"
                         break
-                    if exhausted:
-                        # The industry slice ran out before the cap. Page once without it.
-                        if not broadened and "industries" in active_filters:
-                            active_filters = {
-                                key: value for key, value in active_filters.items() if key != "industries"
-                            }
-                            exhausted = False
-                            broadened = True
-                            continue
-                        stop_reason = "source_exhausted"
-                        break
+                    if not slice_open:
+                        index += 1
+                        slice_open = True
+                        if index >= len(queue):
+                            probed, broadened, tried = _extend_pe_plan(
+                                queue,
+                                filters,
+                                probed=probed,
+                                broadened=broadened,
+                                empty_industry_queries=empty_industry_queries,
+                            )
+                            if tried:
+                                tried_one_at_a_time = tried
+                            if index >= len(queue):
+                                stop_reason = "source_exhausted"
+                                break
+                        continue
+                    spec = queue[index]
+                    if spec.industries_dropped:
+                        broadened = True
                     limit = min(100, cap - len(scanned))
-                    page_offset = reserve_search_offset(active_filters, limit, store.settings.data_dir)
+                    page_offset = reserve_search_offset(spec.filters, limit, store.settings.data_dir)
                     try:
-                        batch = client.search(active_filters, limit=limit, offset=page_offset)
-                    except McpError as exc:
-                        upstream_error = f"MCP HTTP {exc.status}: {exc}"[:500]
+                        batch = client.search(
+                            spec.filters,
+                            limit=limit,
+                            offset=page_offset,
+                            industries_dropped=spec.industries_dropped,
+                        )
+                    except (McpError, requests.Timeout) as exc:
+                        status = getattr(exc, "status", None) or 504
+                        upstream_error = f"MCP HTTP {status}: {exc}"[:500]
                         stop_reason = "upstream_error"
                         break
                     if not batch:
-                        exhausted = True
+                        if spec.filters.get("industries"):
+                            empty_industry_queries += 1
+                            industries = spec.filters.get("industries") or []
+                            states = spec.filters.get("states") or []
+                            logger.info(
+                                "pe industry query empty after excludes industries=%s states=%s",
+                                len(industries) if isinstance(industries, list) else 1,
+                                len(states) if isinstance(states, list) else 1,
+                            )
+                        slice_open = False
                         continue
                     scanned.extend(batch)
                     if len(batch) < limit:
-                        exhausted = True
+                        slice_open = False
                     if progress:
                         progress(
                             {
@@ -434,6 +520,15 @@ def _build_pe_until_full(
         payload["scan_cap"] = cap
         payload["scan_stop"] = stop_reason
         payload["broadened"] = broadened
+        if empty_industry_queries or tried_one_at_a_time:
+            industries = filters.get("industries") or []
+            states = filters.get("states") or []
+            payload["industry_probe"] = {
+                "industries": len(industries) if isinstance(industries, list) else 1,
+                "states": len(states) if isinstance(states, list) else 1,
+                "empty_queries": empty_industry_queries,
+                "tried_one_at_a_time": tried_one_at_a_time,
+            }
         return _attach_model_warning(payload, "pe_partners")
     finally:
         release_people(claimed)
