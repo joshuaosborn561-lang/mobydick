@@ -89,7 +89,6 @@ def health() -> str:
             "connectors": {
                 "getleads": bool(settings.getleads_api_key),
                 "email_waterfall": bool(settings.email_waterfall_url),
-                "leadmagic": bool(settings.leadmagic_api_key),
                 "youtube": bool(settings.youtube_api_key),
                 "taddy": bool(settings.taddy_api_key and settings.taddy_user_id),
                 "apify": bool(settings.apify_api_key),

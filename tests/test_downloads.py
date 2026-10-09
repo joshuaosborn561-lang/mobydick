@@ -17,8 +17,6 @@ def _settings(tmp_path) -> Settings:
         getleads_endpoint="",
         email_waterfall_url="",
         email_waterfall_client_tag="salesglider",
-        leadmagic_api_key="",
-        leadmagic_endpoint="",
         youtube_api_key="",
         taddy_user_id="",
         taddy_api_key="",
