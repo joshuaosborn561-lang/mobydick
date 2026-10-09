@@ -502,7 +502,7 @@ def test_empty_industry_query_tries_a_few_then_splits_states(tmp_path, monkeypat
     assert result["industry_probe"]["states"] == 5
     assert result["industry_probe"]["tried_one_at_a_time"] == industries[:3]
     assert all(len(call["states"]) <= 3 for call in calls)
-    assert all(call["limit"] <= 25 for call in calls)
+    assert all(call["limit"] <= 10 for call in calls)
     assert calls[0]["industries"] == industries
     assert calls[0]["states"] == ["AL", "AK", "AZ"]
     dropped_at = next(index for index, call in enumerate(calls) if call["dropped"])
@@ -539,3 +539,72 @@ def test_timeout_keeps_people_found_before_the_wide_query(tmp_path, monkeypatch)
     assert "50" in result["error"]
     assert result["csv_path"]
     assert {sample["full_name"] for sample in result["samples"]} == {"Ann Keeper"}
+
+
+def test_search_timeout_retries_at_five_rows_then_keeps_the_person(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    from mobydick.mcp_http import McpError
+
+    limits: list[int] = []
+
+    class FakeLeads:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0, **_ignored: object) -> list[dict[str, str]]:
+            limits.append(limit)
+            if filters.get("industries"):
+                return []
+            if limit > 5:
+                raise McpError(
+                    "MCP tool search_contacts failed: Search timed out after 50s",
+                    is_tool_error=True,
+                    body='{"error":"search_timeout","message":"Search timed out after 50s"}',
+                )
+            return [_pe_row("Ann Keeper", "ann.com")]
+
+    result = build_enriched_list(
+        "pe_partners",
+        1,
+        store=Store(_settings(tmp_path)),
+        getleads=FakeLeads(),
+        fetch_pages=False,
+    )
+    assert 10 in limits
+    assert 5 in limits
+    assert result["delivered"] == 1
+    assert result["scan_stop"] == "filled"
+    assert result.get("partial") is not True
+
+
+def test_search_timeout_on_one_title_continues_with_the_next(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    from mobydick.mcp_http import McpError
+
+    seen: list[list[str]] = []
+
+    class FakeLeads:
+        def search(self, filters: dict, limit: int = 100, offset: int = 0, **_ignored: object) -> list[dict[str, str]]:
+            titles = list(filters.get("job_titles") or [])
+            seen.append(titles)
+            if filters.get("industries"):
+                return []
+            if titles == ["Partner"]:
+                raise McpError(
+                    "Search timed out after 50s",
+                    is_tool_error=True,
+                    body='{"error":"search_timeout","message":"Search timed out after 50s"}',
+                )
+            return [_pe_row("Ann Keeper", "ann.com")]
+
+    result = build_enriched_list(
+        "pe_partners",
+        1,
+        store=Store(_settings(tmp_path)),
+        getleads=FakeLeads(),
+        fetch_pages=False,
+    )
+    assert ["Partner"] in seen
+    assert any(titles and titles != ["Partner"] for titles in seen)
+    assert result["delivered"] == 1
+    assert result["scan_stop"] == "filled"
+    assert result.get("partial") is not True

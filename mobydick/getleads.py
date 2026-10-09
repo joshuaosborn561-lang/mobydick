@@ -134,11 +134,12 @@ SEARCH_TIMEOUT = 90
 LARGE_SEARCH_TIMEOUT = 150
 DROPPED_INDUSTRY_TIMEOUT = 210
 STATE_BATCH = 3
-TITLE_BATCH = 3
+TITLE_BATCH = 1
 INDUSTRY_PROBE = 3
 NARROW_PAGE_SIZE = 100
-# A page of 100 on states + titles + description hit the 50s server cap.
-WIDE_PAGE_SIZE = 25
+# A page of 25 on a widened title batch still hit GetLeads' 50s search_timeout.
+WIDE_PAGE_SIZE = 10
+MIN_PAGE_SIZE = 5
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -188,8 +189,8 @@ def search_timeout_for(filters: dict[str, Any], *, industries_dropped: bool = Fa
 def search_filter_slices(filters: dict[str, Any]) -> list[dict[str, Any]]:
     """Split a wide filter so one search_contacts call can finish.
 
-    Many states go out in batches of three. After industries are gone, a long
-    title list is split the same way. A short filter stays one query.
+    Many states go out in batches of three. After industries are gone, each
+    title is its own query. A short filter stays one query.
     """
     states = _as_list(filters.get("states"))
     titles = _as_list(filters.get("job_titles"))
@@ -216,6 +217,21 @@ def dropped_industry_slices(filters: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     dropped = {key: value for key, value in filters.items() if key != "industries"}
     return search_filter_slices(dropped)
+
+
+def narrower_filters(filters: dict[str, Any]) -> list[dict[str, Any]]:
+    """Break a query that hit GetLeads' 50s cap into smaller ones.
+
+    Titles first, then states. Empty when the query is already one title
+    and one state, so the caller can skip it and try the next query.
+    """
+    titles = _as_list(filters.get("job_titles"))
+    if len(titles) > 1:
+        return [_with_key(filters, "job_titles", [title]) for title in titles]
+    states = _as_list(filters.get("states"))
+    if len(states) > 1:
+        return [_with_key(filters, "states", [state]) for state in states]
+    return []
 
 
 class GetLeadsClient:

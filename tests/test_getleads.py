@@ -132,6 +132,7 @@ def test_wide_filters_are_split_and_wait_longer():
         LARGE_SEARCH_TIMEOUT,
         SEARCH_TIMEOUT,
         industry_probe_slices,
+        narrower_filters,
         search_filter_slices,
         search_page_limit,
         search_timeout_for,
@@ -143,8 +144,8 @@ def test_wide_filters_are_split_and_wait_longer():
         "states": ["AL", "AK", "AZ", "AR"],
     }
     assert search_page_limit(small) == 100
-    assert search_page_limit(large) == 25
-    assert search_page_limit(small, industries_dropped=True) == 25
+    assert search_page_limit(large) == 10
+    assert search_page_limit(small, industries_dropped=True) == 10
     assert search_page_limit(large, remaining=10) == 10
     assert search_timeout_for(small) == SEARCH_TIMEOUT
     assert search_timeout_for(large) == LARGE_SEARCH_TIMEOUT
@@ -161,9 +162,20 @@ def test_wide_filters_are_split_and_wait_longer():
         {"job_titles": ["Partner", "Principal", "Founder", "Director"], "company_description": "private equity"}
     )
     assert [item["job_titles"] for item in widened] == [
-        ["Partner", "Principal", "Founder"],
+        ["Partner"],
+        ["Principal"],
+        ["Founder"],
         ["Director"],
     ]
+    assert narrower_filters({"job_titles": ["Partner", "Principal"], "states": ["Texas", "Ohio"]}) == [
+        {"job_titles": ["Partner"], "states": ["Texas", "Ohio"]},
+        {"job_titles": ["Principal"], "states": ["Texas", "Ohio"]},
+    ]
+    assert narrower_filters({"job_titles": ["Partner"], "states": ["Texas", "Ohio"]}) == [
+        {"job_titles": ["Partner"], "states": ["Texas"]},
+        {"job_titles": ["Partner"], "states": ["Ohio"]},
+    ]
+    assert narrower_filters({"job_titles": ["Partner"], "states": ["Texas"]}) == []
 
     industries = ["Private Equity", "Investment Management", "Capital Markets", "Banking"]
     probed = industry_probe_slices({"industries": industries, "states": ["Texas"], "job_titles": ["Partner"]})

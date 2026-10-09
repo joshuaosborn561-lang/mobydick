@@ -134,7 +134,7 @@ def build_enriched_list(
     filters = optional GetLeads overrides (job_titles, industries, states, ...)
     story_first defaults on for pe_partners. A row ships only with a cited personal fact.
     If the scan cap is hit first, the shortfall is the number still missing.
-    scan_stop says filled, scan_cap, source_exhausted, or upstream_error. GetLeads stops a search at 50 seconds. A wide state list is searched three states at a time, 25 rows a page. An empty industry slice is tried one industry at a time, then paged without that filter. A timeout still writes the people already verified.
+    scan_stop says filled, scan_cap, source_exhausted, or upstream_error. GetLeads stops a search at 50 seconds. Wide pages ask for 10 rows, one title at a time after industries are dropped. A search_timeout is retried smaller, then the next query. A timeout still writes the people already verified.
     Long jobs return job_id. Poll get_job_status. Never dumps the list into chat.
     """
     _ensure_cwd()
