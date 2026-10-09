@@ -317,6 +317,23 @@ def _extend_pe_plan(
     return probed, broadened, tried
 
 
+def _search_timeout(exc: BaseException) -> bool:
+    """True when GetLeads aborted the search, or the gateway timed out.
+
+    search_timeout is a tool error. The HTTP client does not retry those.
+    A longer client wait does not raise GetLeads' 50 second cap.
+    """
+    import requests
+
+    if isinstance(exc, requests.Timeout):
+        return True
+    status = getattr(exc, "status", None)
+    if status in {502, 503, 504}:
+        return True
+    text = f"{exc} {getattr(exc, 'body', '')}".lower()
+    return "search_timeout" in text or "timed out after 50" in text
+
+
 def _build_pe_until_full(
     *,
     wanted: int,
@@ -331,7 +348,7 @@ def _build_pe_until_full(
     """Page GetLeads until enough PE keepers pass, or the scan cap is hit."""
     import requests
 
-    from mobydick.getleads import search_filter_slices, search_page_limit
+    from mobydick.getleads import MIN_PAGE_SIZE, narrower_filters, search_filter_slices, search_page_limit
     from mobydick.pe_fit import assess_pe
     from mobydick.research.trace import tracing
     from mobydick.getleads_gate import claim_person, release_people, reserve_search_offset
@@ -357,6 +374,7 @@ def _build_pe_until_full(
     slice_open = True
     empty_industry_queries = 0
     tried_one_at_a_time: list[str] = []
+    timeout_error = ""
     try:
         with tracing() as trace:
             while len(keepers) < wanted:
@@ -390,18 +408,61 @@ def _build_pe_until_full(
                         remaining=cap - len(scanned),
                     )
                     page_offset = reserve_search_offset(spec.filters, limit, store.settings.data_dir)
-                    try:
-                        batch = client.search(
-                            spec.filters,
-                            limit=limit,
-                            offset=page_offset,
-                            industries_dropped=spec.industries_dropped,
-                        )
-                    except (McpError, requests.Timeout) as exc:
-                        status = getattr(exc, "status", None) or 504
-                        upstream_error = f"MCP HTTP {status}: {exc}"[:500]
-                        stop_reason = "upstream_error"
+                    narrowed = False
+                    while True:
+                        try:
+                            batch = client.search(
+                                spec.filters,
+                                limit=limit,
+                                offset=page_offset,
+                                industries_dropped=spec.industries_dropped,
+                            )
+                            break
+                        except (McpError, requests.Timeout) as exc:
+                            if _search_timeout(exc) and limit > MIN_PAGE_SIZE:
+                                limit = MIN_PAGE_SIZE
+                                logger.warning(
+                                    "pe search_timeout offset=%s; retrying limit=%s",
+                                    page_offset,
+                                    limit,
+                                )
+                                continue
+                            smaller = narrower_filters(spec.filters) if _search_timeout(exc) else []
+                            if smaller:
+                                queue[index + 1 : index + 1] = [
+                                    _SearchSlice(item, industries_dropped=spec.industries_dropped)
+                                    for item in smaller
+                                ]
+                                logger.warning(
+                                    "pe search_timeout; splitting into %s narrower queries",
+                                    len(smaller),
+                                )
+                                narrowed = True
+                                batch = []
+                                break
+                            if _search_timeout(exc):
+                                status = getattr(exc, "status", None)
+                                if status:
+                                    timeout_error = f"MCP HTTP {status}: {exc}"[:500]
+                                else:
+                                    timeout_error = str(exc)[:500]
+                                logger.warning("pe search_timeout; skipping a query that is already narrow")
+                                narrowed = True
+                                batch = []
+                                break
+                            status = getattr(exc, "status", None)
+                            if status:
+                                upstream_error = f"MCP HTTP {status}: {exc}"[:500]
+                            else:
+                                upstream_error = str(exc)[:500]
+                            stop_reason = "upstream_error"
+                            logger.warning("pe search stopped: %s", upstream_error)
+                            break
+                    if upstream_error:
                         break
+                    if narrowed:
+                        slice_open = False
+                        continue
                     if not batch:
                         if spec.filters.get("industries"):
                             empty_industry_queries += 1
@@ -415,6 +476,7 @@ def _build_pe_until_full(
                         slice_open = False
                         continue
                     scanned.extend(batch)
+                    timeout_error = ""
                     if len(batch) < limit:
                         slice_open = False
                     if progress:
@@ -489,6 +551,9 @@ def _build_pe_until_full(
                             kept_domains.discard(normalize_domain(row["company_domain"]))
                         continue
                     keepers.append(row)
+            if timeout_error and not upstream_error and len(keepers) < wanted:
+                upstream_error = timeout_error
+                stop_reason = "upstream_error"
             research = trace.as_dict()
         logger.info("pe research %s", research)
         unique_domains = {
