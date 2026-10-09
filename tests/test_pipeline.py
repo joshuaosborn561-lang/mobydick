@@ -10,8 +10,6 @@ def _settings(tmp_path) -> Settings:
         getleads_endpoint="",
         email_waterfall_url="",
         email_waterfall_client_tag="salesglider",
-        leadmagic_api_key="",
-        leadmagic_endpoint="",
         youtube_api_key="",
         taddy_user_id="",
         taddy_api_key="",
@@ -608,3 +606,48 @@ def test_search_timeout_on_one_title_continues_with_the_next(tmp_path, monkeypat
     assert result["delivered"] == 1
     assert result["scan_stop"] == "filled"
     assert result.get("partial") is not True
+
+
+def test_pipeline_passes_store_settings_into_email_fill(tmp_path, monkeypatch):
+    seen: dict[str, object] = {}
+
+    def fake_fill(rows, *, settings=None, **kwargs):
+        seen["settings"] = settings
+        seen["missing"] = sum(1 for row in rows if not (row.get("email") or "").strip())
+        return {
+            "missing_before": 1,
+            "filled": 1,
+            "still_missing": 0,
+            "enrich_one_calls": 1,
+            "estimated_cost_usd": 0.25,
+            "spend": 0.02,
+            "stopped_at_ceiling": False,
+        }
+
+    monkeypatch.setattr("mobydick.pipeline.fill_missing_emails", fake_fill)
+    settings = _settings(tmp_path)
+    store = Store(settings)
+    result = build_enriched_list(
+        "series_ab",
+        1,
+        store=store,
+        fetch_pages=False,
+        raw_rows=[
+            {
+                "full_name": "Ada Founder",
+                "first_name": "Ada",
+                "last_name": "Founder",
+                "title": "CEO & Founder",
+                "email": "",
+                "company_name": "Fresh",
+                "company_domain": "fresh.com",
+                "funding_round": "series a",
+                "funding_date": "2024-08-01",
+            }
+        ],
+    )
+    assert seen["settings"] is settings
+    assert seen["missing"] == 1
+    assert result["waterfall"]["enrich_one_calls"] == 1
+    assert "leadmagic_calls" not in result["waterfall"]
+    assert result["emails_filled"] == 1

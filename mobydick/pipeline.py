@@ -152,7 +152,7 @@ def build_enriched_list(
     if progress:
         progress({"stage": "dedupe", "unique": len(unique), "fresh": len(fresh), "dropped_prior": dropped_prior})
 
-    waterfall_stats = fill_missing_emails(fresh, progress=progress)
+    waterfall_stats = fill_missing_emails(fresh, settings=store.settings, progress=progress)
     research = None
     if name == "pe_partners":
         from mobydick.research.trace import tracing
@@ -541,7 +541,9 @@ def _build_pe_until_full(
                 else:
                     fresh = pending[: wanted - len(keepers)]
                     pending = pending[len(fresh) :]
-                waterfall_parts.append(fill_missing_emails(fresh, progress=progress))
+                waterfall_parts.append(
+                    fill_missing_emails(fresh, settings=store.settings, progress=progress)
+                )
                 batch_enriched = enrich_rows(fresh, "pe_partners", fetch_pages=fetch_pages, progress=progress)
                 _apply_story_gate(batch_enriched, story_first=story_first and fetch_pages)
                 enriched.extend(batch_enriched)
@@ -605,12 +607,23 @@ def _build_pe_until_full(
 
 def _merge_waterfall(parts: list[dict[str, Any]]) -> dict[str, Any]:
     if not parts:
-        return {"missing_before": 0, "filled": 0, "still_missing": 0, "leadmagic_calls": 0}
+        return {
+            "missing_before": 0,
+            "filled": 0,
+            "still_missing": 0,
+            "enrich_one_calls": 0,
+            "estimated_cost_usd": 0.0,
+            "spend": 0.0,
+            "stopped_at_ceiling": False,
+        }
     return {
         "missing_before": sum(int(part.get("missing_before") or 0) for part in parts),
         "filled": sum(int(part.get("filled") or 0) for part in parts),
         "still_missing": sum(int(part.get("still_missing") or 0) for part in parts),
-        "leadmagic_calls": sum(int(part.get("leadmagic_calls") or 0) for part in parts),
+        "enrich_one_calls": sum(int(part.get("enrich_one_calls") or 0) for part in parts),
+        "estimated_cost_usd": round(sum(float(part.get("estimated_cost_usd") or 0) for part in parts), 6),
+        "spend": round(sum(float(part.get("spend") or 0) for part in parts), 6),
+        "stopped_at_ceiling": any(part.get("stopped_at_ceiling") for part in parts),
     }
 
 
@@ -660,7 +673,10 @@ def _delivery_payload(
         "waterfall": {
             "missing_before": waterfall_stats.get("missing_before"),
             "filled": waterfall_stats.get("filled"),
-            "leadmagic_calls": waterfall_stats.get("leadmagic_calls"),
+            "enrich_one_calls": waterfall_stats.get("enrich_one_calls"),
+            "estimated_cost_usd": waterfall_stats.get("estimated_cost_usd"),
+            "spend": waterfall_stats.get("spend"),
+            "stopped_at_ceiling": waterfall_stats.get("stopped_at_ceiling"),
         },
     }
 

@@ -16,6 +16,19 @@ def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = _env(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if value < 0:
+        return default
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path
@@ -23,8 +36,6 @@ class Settings:
     getleads_endpoint: str
     email_waterfall_url: str
     email_waterfall_client_tag: str
-    leadmagic_api_key: str
-    leadmagic_endpoint: str
     youtube_api_key: str
     taddy_user_id: str
     taddy_api_key: str
@@ -33,6 +44,8 @@ class Settings:
     apify_actor: str
     anthropic_api_key: str
     openai_api_key: str
+    email_waterfall_approve_cost_usd: float = 0.25
+    email_waterfall_run_ceiling_usd: float = 25.0
 
     @property
     def exclude_dir(self) -> Path:
@@ -65,8 +78,6 @@ def load_settings() -> Settings:
             "https://email-waterfall-production-021b.up.railway.app/mcp",
         ),
         email_waterfall_client_tag=_env("EMAIL_WATERFALL_CLIENT_TAG", "salesglider"),
-        leadmagic_api_key=_env("LEADMAGIC_API_KEY"),
-        leadmagic_endpoint=_env("LEADMAGIC_ENDPOINT", "https://api.leadmagic.io"),
         youtube_api_key=_env("YOUTUBE_API_KEY"),
         taddy_user_id=_env("TADDY_USER_ID"),
         taddy_api_key=_env("TADDY_API_KEY"),
@@ -75,6 +86,8 @@ def load_settings() -> Settings:
         apify_actor=_env("APIFY_ACTOR", "harvestapi~linkedin-profile-posts"),
         anthropic_api_key=_env("ANTHROPIC_API_KEY"),
         openai_api_key=_env("OPENAI_API_KEY"),
+        email_waterfall_approve_cost_usd=_env_float("EMAIL_WATERFALL_APPROVE_COST_USD", 0.25),
+        email_waterfall_run_ceiling_usd=_env_float("EMAIL_WATERFALL_RUN_CEILING_USD", 25.0),
     )
 
 

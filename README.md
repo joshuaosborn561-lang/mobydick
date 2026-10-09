@@ -32,7 +32,7 @@ Lists never go into chat. Counts and about 10 sample names only. `download_deliv
 
 1. GetLeads pull (1.5x to 3x the ask). Series A/B default: US HQ, SaaS/software, CEO or Founder, Series A or B, funded since 2024-01-01, require email, one per company. PE default: US person and US HQ, real private equity / growth equity / buyout firms, and partner-grade deal titles only. Banks, advisors, non-US roles, and substring title matches are dropped.
 2. De-dupe against `data/exclude/*.json` **and same-day delivery files**. The morning file counts.
-3. Missing emails: Josh's email-waterfall MCP (`client_tag=salesglider`) plus LeadMagic so the CSV itself gets filled. Waterfall MCP never returns row payloads.
+3. Missing emails: Josh's email-waterfall `POST /enrich-one` (`client_tag=salesglider`). Order is GetLeads → Smartlead → AI Ark → Prospeo → FullEnrich. Each person is estimated first (`approve_cost_usd` default $0.25). A run stops at a $25 ceiling. The compact hit writes the email into the CSV. Never touch `dl_status`, `sg_exclude`, or `skip_*`.
 4. Public-source enrichment: company about/contact pages for the office address. PE rows also use YouTube, Taddy, and Apify for the person's life story. Whale dossiers use the same connectors. Every personal fact needs a public source. Blank if none.
 5. Office mailing address only. Never a home address. Never invent. Blank if none.
 6. DQ column for bad fits. Keepers only go in the delivery CSV.
