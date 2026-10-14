@@ -1,5 +1,6 @@
 import requests
 
+from mobydick.config import load_settings
 from mobydick.research.trace import tracing
 
 
@@ -10,6 +11,16 @@ class _Resp:
 
     def json(self):
         return self._payload
+
+
+def _settings(monkeypatch, key: str):
+    if key:
+        monkeypatch.setenv("SERPER_API_KEY", key)
+    else:
+        monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    cfg = load_settings()
+    monkeypatch.setattr("mobydick.research.serper.default_settings", cfg)
+    return cfg
 
 
 def test_google_search_posts_to_serper_and_maps_organic(monkeypatch):
@@ -37,7 +48,8 @@ def test_google_search_posts_to_serper_and_maps_organic(monkeypatch):
     def fail_apify(*args, **kwargs):
         raise AssertionError("must not fall back to Apify")
 
-    monkeypatch.setenv("SERPER_API_KEY", "test-serper-key")
+    cfg = _settings(monkeypatch, "test-serper-key")
+    assert cfg.serper_api_key == "test-serper-key"
     monkeypatch.setattr("mobydick.research.serper.requests.post", fake_post)
     monkeypatch.setattr("mobydick.research.apify.run_actor", fail_apify)
 
@@ -66,7 +78,8 @@ def test_google_search_posts_to_serper_and_maps_organic(monkeypatch):
 
 
 def test_google_search_without_key_is_empty_and_does_not_call_serper(monkeypatch):
-    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    cfg = _settings(monkeypatch, "")
+    assert cfg.serper_api_key == ""
 
     def fail_post(*args, **kwargs):
         raise AssertionError("must not call Serper without a key")
@@ -83,7 +96,7 @@ def test_google_search_without_key_is_empty_and_does_not_call_serper(monkeypatch
 
 
 def test_google_search_request_error_is_empty(monkeypatch):
-    monkeypatch.setenv("SERPER_API_KEY", "test-serper-key")
+    _settings(monkeypatch, "test-serper-key")
 
     def boom(*args, **kwargs):
         raise requests.Timeout("serper timed out")

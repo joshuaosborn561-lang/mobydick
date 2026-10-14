@@ -3,21 +3,28 @@
 from __future__ import annotations
 
 import logging
-import os
 
 import requests
+
+from mobydick.config import Settings, settings as default_settings
 
 logger = logging.getLogger("mobydick.research.serper")
 
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
 
 
-def google_search(query: str, *, limit: int = 8) -> list[dict[str, str]]:
+def google_search(
+    query: str,
+    *,
+    limit: int = 8,
+    settings: Settings | None = None,
+) -> list[dict[str, str]]:
     """Public Google results for a bio or interview. No-op without SERPER_API_KEY."""
     from mobydick.research.trace import note
 
+    cfg = settings or default_settings
     query = (query or "").strip()
-    key = os.environ.get("SERPER_API_KEY", "").strip()
+    key = (cfg.serper_api_key or "").strip()
     if not query or not key:
         return []
     note("searches_run")
