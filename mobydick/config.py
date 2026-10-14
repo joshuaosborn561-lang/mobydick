@@ -42,6 +42,7 @@ class Settings:
     taddy_endpoint: str
     apify_api_key: str
     apify_actor: str
+    serper_api_key: str
     anthropic_api_key: str
     openai_api_key: str
     email_waterfall_approve_cost_usd: float = 0.25
@@ -84,6 +85,7 @@ def load_settings() -> Settings:
         taddy_endpoint=_env("TADDY_ENDPOINT", "https://api.taddy.org"),
         apify_api_key=_env("APIFY_API_KEY"),
         apify_actor=_env("APIFY_ACTOR", "harvestapi~linkedin-profile-posts"),
+        serper_api_key=_env("SERPER_API_KEY"),
         anthropic_api_key=_env("ANTHROPIC_API_KEY"),
         openai_api_key=_env("OPENAI_API_KEY"),
         email_waterfall_approve_cost_usd=_env_float("EMAIL_WATERFALL_APPROVE_COST_USD", 0.25),

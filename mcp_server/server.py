@@ -92,6 +92,7 @@ def health() -> str:
                 "youtube": bool(settings.youtube_api_key),
                 "taddy": bool(settings.taddy_api_key and settings.taddy_user_id),
                 "apify": bool(settings.apify_api_key),
+                "serper": bool(settings.serper_api_key),
                 "anthropic": bool(settings.anthropic_api_key),
                 "openai": bool(settings.openai_api_key),
             },

@@ -14,8 +14,7 @@ from mobydick.config import Settings, settings as default_settings
 
 logger = logging.getLogger("mobydick.research.apify")
 
-# LinkedIn posts stay on APIFY_ACTOR. Web search uses Apify's Google Search actor.
-GOOGLE_SEARCH_ACTOR = "apify~google-search-scraper"
+# LinkedIn posts stay on APIFY_ACTOR. Web search is Serper, not Apify.
 # Renders JS pages when a plain GET comes back empty or blocked.
 RENDER_ACTOR = "apify~website-content-crawler"
 
@@ -89,61 +88,6 @@ def linkedin_posts(profile_url: str, **kwargs: Any) -> list[dict[str, Any]]:
     if not profile_url:
         return []
     return run_actor({"profileUrls": [profile_url], "maxPosts": 10}, **kwargs)
-
-
-def _organic_results(items: list[dict[str, Any]], limit: int) -> list[dict[str, str]]:
-    found: list[dict[str, str]] = []
-    for item in items:
-        organic = item.get("organicResults") if isinstance(item, dict) else None
-        rows = organic if isinstance(organic, list) else [item]
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            url = str(row.get("url") or row.get("link") or "")
-            if not url.startswith("http"):
-                continue
-            found.append(
-                {
-                    "url": url,
-                    "title": str(row.get("title") or ""),
-                    "description": str(row.get("description") or row.get("snippet") or ""),
-                }
-            )
-            if len(found) >= limit:
-                return found
-    return found
-
-
-def google_search(query: str, *, limit: int = 8) -> list[dict[str, str]]:
-    """Public Google results for a bio or interview. No-op without APIFY_API_KEY."""
-    from mobydick.research.trace import note
-
-    query = (query or "").strip()
-    key = os.environ.get("APIFY_API_KEY", "").strip() or default_settings.apify_api_key
-    if not query or not key:
-        return []
-    note("searches_run")
-    cfg = replace(default_settings, apify_api_key=key, apify_actor=GOOGLE_SEARCH_ACTOR)
-    items = run_actor(
-        {
-            "queries": query,
-            "maxPagesPerQuery": 1,
-            "countryCode": "us",
-            "languageCode": "en",
-            "searchLanguage": "en",
-            "maximumLeadsEnrichmentRecords": 0,
-            "geminiSearch": {"enableGemini": False},
-            "perplexitySearch": {"enablePerplexity": False},
-            "chatGptSearch": {"enableChatGpt": False},
-            "copilotSearch": {"enableCopilot": False},
-            "aiModeSearch": {"enableAiMode": False},
-        },
-        settings=cfg,
-        wait_secs=35,
-    )
-    results = _organic_results(items, limit)
-    logger.info("google search results=%s", len(results))
-    return results
 
 
 def fetch_rendered_page(url: str) -> str:

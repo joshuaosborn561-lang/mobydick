@@ -27,6 +27,7 @@ def _settings(tmp_path, **overrides) -> Settings:
         taddy_endpoint="",
         apify_api_key="",
         apify_actor="",
+        serper_api_key="",
         anthropic_api_key="",
         openai_api_key="",
         email_waterfall_approve_cost_usd=0.25,
