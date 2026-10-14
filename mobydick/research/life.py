@@ -11,7 +11,8 @@ from typing import Any
 from urllib.parse import urljoin
 
 from mobydick.config import settings as default_settings
-from mobydick.research.apify import fetch_rendered_page, google_search, linkedin_posts
+from mobydick.research.apify import fetch_rendered_page, linkedin_posts
+from mobydick.research.serper import google_search
 from mobydick.research.blocklist import is_people_search
 from mobydick.research.extract import llm_extract
 from mobydick.research.taddy import search_episodes
