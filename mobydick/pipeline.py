@@ -20,6 +20,7 @@ from mobydick.getleads import GetLeadsClient
 from mobydick.schemas import compact_sample
 from mobydick.store import Store
 from mobydick.waterfall import fill_missing_emails
+from mobydick.workers import map_ordered, worker_count
 
 
 def _one_per_company(rows: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -220,20 +221,11 @@ def _score_footprints(pending: list[dict[str, str]], limit: int) -> None:
         if len(todo) >= limit:
             break
         todo.append(row)
-    if len(todo) <= 1:
-        for row in todo:
-            _apply_footprint(row)
-        return
-    import contextvars
-    from concurrent.futures import ThreadPoolExecutor
-
-    with ThreadPoolExecutor(max_workers=min(5, len(todo))) as pool:
-        futures = []
-        for row in todo:
-            ctx = contextvars.copy_context()
-            futures.append(pool.submit(ctx.run, _apply_footprint, row))
-        for future in futures:
-            future.result()
+    map_ordered(
+        _apply_footprint,
+        todo,
+        workers=worker_count("PIPELINE_WORKERS", len(todo)),
+    )
 
 
 def _person_key(row: dict[str, str]) -> str:
