@@ -38,7 +38,7 @@ def test_getleads_concurrency_reads_env(monkeypatch):
 
 def test_rate_limiter_spaces_starts_at_four_per_second():
     sleeps: list[float] = []
-    ticks = iter([100.0, 100.0, 100.05, 100.05])
+    ticks = iter([100.0, 100.05])
     limiter = RateLimiter(rps=4)
     limiter.clock = lambda: next(ticks)
     limiter.sleep = sleeps.append
