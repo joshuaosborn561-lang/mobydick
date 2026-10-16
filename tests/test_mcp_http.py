@@ -3,7 +3,14 @@ import json
 import pytest
 import requests
 
-from mobydick.mcp_http import McpError, McpHttpClient, extract_tool_result, parse_mcp_response, tool_error_detail
+from mobydick.mcp_http import (
+    McpError,
+    McpHttpClient,
+    extract_tool_result,
+    is_rate_limit,
+    parse_mcp_response,
+    tool_error_detail,
+)
 
 
 class _Resp:
@@ -136,3 +143,78 @@ def test_rpc_does_not_retry_a_client_error():
         _client(session)._rpc("tools/call", {"name": "search_contacts", "arguments": {}})
     assert session.calls == 1
     assert caught.value.status == 400
+
+
+def _tool_error(text: str, rpc_id: int) -> _Resp:
+    return _Resp(
+        {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {
+                "isError": True,
+                "content": [{"type": "text", "text": text}],
+            },
+        }
+    )
+
+
+def test_too_many_requests_is_a_rate_limit_not_an_error():
+    assert is_rate_limit(McpError("slow down", status=429, body="")) is True
+    assert is_rate_limit(McpError("MCP tool isError: Too many requests", is_tool_error=True, body="Too many requests")) is True
+    assert is_rate_limit(McpError("invalid_columns: title", is_tool_error=True, body="invalid_columns: title")) is False
+
+
+def test_rpc_retries_http_429_with_jitter_backoff():
+    session = _Session([])
+    delays: list[float] = []
+
+    def post(url, json=None, headers=None, timeout=None):
+        session.calls += 1
+        if session.calls == 1:
+            return _Resp("Too many requests", status=429)
+        return _ok(json)
+
+    session.post = post
+    client = _client(session)
+    client._sleeper = delays.append
+    rpc = client._rpc("tools/call", {"name": "search_contacts", "arguments": {}})
+    assert rpc["result"]["ok"] is True
+    assert session.calls == 2
+    assert len(delays) == 1
+    assert delays[0] >= 0.5
+
+
+def test_rpc_retries_too_many_requests_tool_error():
+    session = _Session([])
+    delays: list[float] = []
+
+    def post(url, json=None, headers=None, timeout=None):
+        session.calls += 1
+        if session.calls == 1:
+            return _tool_error("Too many requests", json["id"])
+        return _ok(json)
+
+    session.post = post
+    client = _client(session)
+    client._sleeper = delays.append
+    rpc = client._rpc("tools/call", {"name": "search_contacts", "arguments": {}})
+    assert rpc["result"]["ok"] is True
+    assert session.calls == 2
+    assert delays and delays[0] >= 0.5
+
+
+def test_rpc_does_not_retry_a_non_rate_limit_tool_error():
+    session = _Session([])
+
+    def post(url, json=None, headers=None, timeout=None):
+        session.calls += 1
+        return _tool_error("invalid_columns: title", json["id"])
+
+    session.post = post
+    rpc = _client(session)._rpc("tools/call", {"name": "search_contacts", "arguments": {}})
+    assert rpc["result"]["isError"] is True
+    assert session.calls == 1
+    with pytest.raises(McpError) as caught:
+        extract_tool_result(rpc)
+    assert caught.value.is_tool_error is True
+    assert is_rate_limit(caught.value) is False

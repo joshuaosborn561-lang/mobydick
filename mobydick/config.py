@@ -29,6 +29,29 @@ def _env_float(name: str, default: float) -> float:
     return value
 
 
+def env_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """Read an int env var. Empty or invalid values use default, then clamp."""
+    raw = _env(name)
+    if not raw:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+    if minimum is not None and value < minimum:
+        value = minimum
+    if maximum is not None and value > maximum:
+        value = maximum
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path

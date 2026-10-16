@@ -27,6 +27,7 @@ from mobydick.research.trace import current, drop_person, isolated, note_not_pe
 from mobydick.research.web import gather_company_pages
 from mobydick.schemas import empty_row
 from mobydick.store import LIST_PE
+from mobydick.workers import map_ordered, worker_count
 
 logger = logging.getLogger("mobydick.enrich")
 
@@ -263,8 +264,9 @@ def enrich_rows(
     fetch_pages: bool = True,
     progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, str]]:
-    # Page fetches are the slow part. A few people at a time, still in input order.
-    # Sequential when pages are off so tests that record call order stay stable.
+    # Page fetches are the slow part. ENRICH_WORKERS (default 8, cap 16) at a
+    # time, still in input order. Sequential when pages are off so tests that
+    # record call order stay stable, and when workers=1.
     if not fetch_pages or len(raws) <= 1:
         out: list[dict[str, str]] = []
         for index, raw in enumerate(raws, start=1):
@@ -273,21 +275,16 @@ def enrich_rows(
                 progress({"enriched": index, "total": len(raws)})
         return out
 
-    import contextvars
-    from concurrent.futures import ThreadPoolExecutor
-
     def _run(raw: dict[str, str]) -> dict[str, str]:
         return apply_enrichment(raw, audience, fetch_pages=fetch_pages)
 
-    workers = min(5, len(raws))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = []
-        for raw in raws:
-            ctx = contextvars.copy_context()
-            futures.append(pool.submit(ctx.run, _run, raw))
-        out = []
-        for index, future in enumerate(futures, start=1):
-            out.append(future.result())
-            if progress:
-                progress({"enriched": index, "total": len(raws)})
-    return out
+    def _on_progress(index: int, total: int) -> None:
+        if progress:
+            progress({"enriched": index, "total": total})
+
+    return map_ordered(
+        _run,
+        raws,
+        workers=worker_count("ENRICH_WORKERS", len(raws)),
+        progress=_on_progress if progress else None,
+    )

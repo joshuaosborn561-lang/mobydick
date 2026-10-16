@@ -17,8 +17,9 @@ logger = logging.getLogger("mobydick.mcp_http")
 ERROR_BODY_LIMIT = 4000
 
 DEFAULT_PROTOCOL = "2025-03-26"
-# CloudFront 502/503/504 and timeouts are transient. Five tries, then surface the error.
-RETRY_STATUSES = frozenset({502, 503, 504})
+# CloudFront 502/503/504, HTTP 429, and timeouts are transient. Five tries, then surface.
+# "Too many requests" is a rate limit, not a permanent tool error.
+RETRY_STATUSES = frozenset({429, 502, 503, 504})
 MAX_RPC_ATTEMPTS = 5
 
 
@@ -105,6 +106,42 @@ def backoff_seconds(attempt: int) -> float:
     """Exponential delay with jitter. attempt is 1-based for the try that just failed."""
     base = 0.5 * (2 ** max(0, attempt - 1))
     return base + random.uniform(0, base * 0.25)
+
+
+def is_rate_limit(exc: BaseException) -> bool:
+    """HTTP 429 or a 'Too many requests' body is a rate limit, not a hard error."""
+    status = getattr(exc, "status", None)
+    if status == 429:
+        return True
+    blob = f"{exc} {getattr(exc, 'body', '')}".lower()
+    return "too many requests" in blob
+
+
+def raise_if_rate_limited(rpc: dict[str, Any]) -> None:
+    """Turn a JSON-RPC / tool-error rate limit into a retryable McpError."""
+    err = rpc.get("error")
+    if isinstance(err, dict):
+        message = str(err.get("message") or err)
+        if "too many requests" in message.lower():
+            body = json.dumps(err, default=str)[:ERROR_BODY_LIMIT]
+            raise McpError(message, status=429, body=body)
+    result = rpc.get("result")
+    if not isinstance(result, dict) or result.get("isError") is not True:
+        return
+    detail = tool_error_detail(result)
+    if "too many requests" in detail.lower():
+        raise McpError(
+            f"MCP tool isError: {detail}",
+            status=429,
+            body=detail,
+            is_tool_error=True,
+        )
+
+
+def _retryable_mcp_error(exc: McpError) -> bool:
+    if is_rate_limit(exc):
+        return True
+    return exc.status in RETRY_STATUSES and not exc.is_tool_error
 
 
 def tool_error_detail(result: dict[str, Any]) -> str:
@@ -304,11 +341,13 @@ class McpHttpClient:
         last_error: Exception | None = None
         for attempt in range(1, MAX_RPC_ATTEMPTS + 1):
             try:
-                return self._rpc_once(method, params, timeout=timeout)
+                rpc = self._rpc_once(method, params, timeout=timeout)
+                raise_if_rate_limited(rpc)
+                return rpc
             except requests.Timeout as exc:
                 last_error = exc
             except McpError as exc:
-                if exc.status not in RETRY_STATUSES or exc.is_tool_error:
+                if not _retryable_mcp_error(exc):
                     raise
                 last_error = exc
             if attempt >= MAX_RPC_ATTEMPTS:
